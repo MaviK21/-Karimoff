@@ -2,10 +2,30 @@ import { createServer } from "http";
 import { randomBytes } from "crypto";
 import db from "./lib/db.js";
 
+import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs/promises";
+
 const PORT = 3000;
 const ADMIN_PASSWORD = "12345";
 
 let adminToken = null;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const UPLOADS_DIR =
+  path.join(
+    __dirname,
+    "uploads"
+  );
+
+await fs.mkdir(
+  UPLOADS_DIR,
+  {
+    recursive: true
+  }
+);
 
 
 // ======================================================
@@ -192,6 +212,60 @@ function readBody(req) {
   });
 }
 
+async function saveUploadedFile(
+  fileName,
+  buffer
+) {
+  const safeName =
+    path.basename(fileName);
+
+  if (!safeName) {
+    throw new Error(
+      "Некорректное имя файла"
+    );
+  }
+
+  const extension =
+    path.extname(
+      safeName
+    ).toLowerCase();
+
+  const allowedExtensions = [
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif"
+  ];
+
+  if (
+    !allowedExtensions.includes(
+      extension
+    )
+  ) {
+    throw new Error(
+      "Недопустимый формат изображения"
+    );
+  }
+
+  const uniqueName =
+    `${Date.now()}-${randomBytes(
+      8
+    ).toString("hex")}${extension}`;
+
+  const filePath =
+    path.join(
+      UPLOADS_DIR,
+      uniqueName
+    );
+
+  await fs.writeFile(
+    filePath,
+    buffer
+  );
+
+  return `/uploads/${uniqueName}`;
+}
 
 // ======================================================
 // КАТЕГОРИИ
@@ -2121,6 +2195,7 @@ const server =
                 <form
                   method="POST"
                   action="/add-product"
+                  enctype="multipart/form-data"
                 >
 
                   <p>
