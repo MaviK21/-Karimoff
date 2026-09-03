@@ -2,9 +2,10 @@ import { createServer } from "http";
 import { randomBytes } from "crypto";
 import db from "./lib/db.js";
 
-import path from "path";
+import pathModule from "path";
 import { fileURLToPath } from "url";
 import fs from "fs/promises";
+import { mkdirSync, writeFileSync } from "fs";
 
 const PORT = 3000;
 const ADMIN_PASSWORD = "12345";
@@ -12,10 +13,10 @@ const ADMIN_PASSWORD = "12345";
 let adminToken = null;
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = pathModule.dirname(__filename);
 
 const UPLOADS_DIR =
-  path.join(
+  pathModule.join(
     __dirname,
     "uploads"
   );
@@ -210,6 +211,181 @@ function readBody(req) {
 
     req.on("error", reject);
   });
+}
+
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+
+    req.on("data", chunk => {
+      chunks.push(chunk);
+    });
+
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks));
+    });
+
+    req.on("error", reject);
+  });
+}
+
+function parseMultipartBody(buffer, contentType) {
+  const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+
+  if (!match) {
+    throw new Error("Не найден boundary multipart/form-data");
+  }
+
+  const boundary = match[1] || match[2];
+
+  const body = buffer.toString("latin1");
+  const delimiter = `--${boundary}`;
+
+  const parts = body.split(delimiter);
+
+  const fields = new Map();
+  const files = new Map();
+
+  for (let part of parts) {
+    part = part.trim();
+
+    if (!part || part === "--") {
+      continue;
+    }
+
+    if (part.endsWith("--")) {
+      part = part.slice(0, -2);
+    }
+
+    const separatorIndex = part.indexOf("\r\n\r\n");
+
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const headersText =
+      part.slice(0, separatorIndex);
+
+    const contentText =
+      part.slice(separatorIndex + 4);
+
+    const dispositionMatch =
+      headersText.match(
+        /Content-Disposition:[^\r\n]*name="([^"]+)"(?:;\s*filename="([^"]*)")?/i
+      );
+
+    if (!dispositionMatch) {
+      continue;
+    }
+
+    const name = dispositionMatch[1];
+    const filename = dispositionMatch[2];
+
+    if (filename !== undefined) {
+      const contentTypeMatch =
+        headersText.match(
+          /Content-Type:\s*([^\r\n]+)/i
+        );
+
+      files.set(name, {
+        filename,
+        contentType:
+          contentTypeMatch
+            ? contentTypeMatch[1].trim()
+            : "application/octet-stream",
+        data: Buffer.from(
+          contentText,
+          "latin1"
+        )
+      });
+
+      continue;
+    }
+
+    fields.set(
+  name,
+  Buffer.from(
+    contentText.replace(/\r\n$/, ""),
+    "latin1"
+  ).toString("utf8")
+);
+  }
+
+  return {
+    get(name) {
+      return fields.get(name) || "";
+    },
+
+    getAll(name) {
+      return [...fields.entries()]
+        .filter(([key]) => key === name)
+        .map(([, value]) => value);
+    },
+
+    getFile(name) {
+      return files.get(name) || null;
+    }
+  };
+}
+
+function saveUploadedImage(file) {
+  if (!file || !file.filename || !file.data.length) {
+    return "";
+  }
+
+  const allowedTypes = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif"
+  };
+
+  const extension =
+    allowedTypes[file.contentType];
+
+  if (!extension) {
+    throw new Error(
+      "Разрешены только JPG, PNG, WebP и GIF"
+    );
+  }
+
+  if (
+    file.data.length >
+    10 * 1024 * 1024
+  ) {
+    throw new Error(
+      "Изображение слишком большое. Максимум 10 МБ."
+    );
+  }
+
+  const uploadsDir =
+    path.join(
+      process.cwd(),
+      "uploads"
+    );
+
+  mkdirSync(
+    uploadsDir,
+    {
+      recursive: true
+    }
+  );
+
+  const filename =
+    `${randomBytes(16).toString("hex")}${extension}`;
+
+  const filePath =
+    path.join(
+      uploadsDir,
+      filename
+    );
+
+  writeFileSync(
+    filePath,
+    file.data
+  );
+
+  return `/uploads/${filename}`;
 }
 
 async function saveUploadedFile(
@@ -637,6 +813,61 @@ const server =
 
         const path =
           url.pathname;
+
+          if (
+  req.method === "GET" &&
+  path.startsWith("/uploads/")
+) {
+  const requestedName =
+    decodeURIComponent(
+      path.slice("/uploads/".length)
+    );
+
+  const safeName =
+    requestedName
+      .split("/")
+      .pop()
+      .split("\\")
+      .pop();
+
+  const filePath =
+    pathModule.join(
+      UPLOADS_DIR,
+      safeName
+    );
+
+  try {
+    const data =
+      await fs.readFile(filePath);
+
+    const ext =
+      pathModule
+        .extname(safeName)
+        .toLowerCase();
+
+    const contentTypes = {
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".png": "image/png",
+      ".webp": "image/webp",
+      ".gif": "image/gif"
+    };
+
+    res.writeHead(200, {
+      "Content-Type":
+        contentTypes[ext] ||
+        "application/octet-stream"
+    });
+
+    return res.end(data);
+  } catch {
+    return sendHtml(
+      res,
+      "Файл не найден",
+      404
+    );
+  }
+}
 
 
         // ==================================================
@@ -2236,9 +2467,10 @@ const server =
                     <br>
 
                     <input
-                      type="url"
-                      name="image"
-                      placeholder="https://example.com/image.jpg"
+  type="file"
+  name="image"
+  accept="image/jpeg,image/png,image/webp,image/gif"
+>
                     >
                   </p>
 
@@ -2262,36 +2494,6 @@ const server =
                     <input
                       type="text"
                       name="brand"
-                      placeholder="Например: DEWALT"
-                    >
-                  </p>
-
-                                    <p>
-                    Артикул:
-
-                    <br>
-
-                    <input
-                      type="text"
-                      name="sku"
-                      value="${escapeHtml(
-                        product.sku || ""
-                      )}"
-                      placeholder="Например: DEWALT-DCD777"
-                    >
-                  </p>
-
-                  <p>
-                    Бренд / производитель:
-
-                    <br>
-
-                    <input
-                      type="text"
-                      name="brand"
-                      value="${escapeHtml(
-                        product.brand || ""
-                      )}"
                       placeholder="Например: DEWALT"
                     >
                   </p>
@@ -2350,8 +2552,17 @@ const server =
           }
 
 
-          const params =
-            await readBody(req);
+          const contentType =
+  req.headers["content-type"] || "";
+
+const rawBody =
+  await readRawBody(req);
+
+const params =
+  parseMultipartBody(
+    rawBody,
+    contentType
+  );
 
 
           const name =
@@ -2369,9 +2580,11 @@ const server =
             params.get("description")
               ?.trim() || "";
 
-          const image =
-            params.get("image")
-              ?.trim() || "";
+          const imageFile =
+  params.getFile("image");
+
+const image =
+  saveUploadedImage(imageFile);
 
           const sku =
             params.get("sku")
@@ -2427,15 +2640,17 @@ const server =
                 brand
               )
               
-              VALUES (?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
             `).run(
-              name,
-              price,
-              description,
-              categoryIds[0] ||
-              null,
-              image
-            );
+  name,
+  price,
+  description,
+  categoryIds[0] ||
+  null,
+  image,
+  sku,
+  brand
+);
 
 
           const productId =
@@ -2558,9 +2773,10 @@ const server =
                 </h1>
 
                 <form
-                  method="POST"
-                  action="/edit-product/${id}"
-                >
+  method="POST"
+  action="/edit-product/${id}"
+  enctype="multipart/form-data"
+>
 
                   <p>
                     Название:
@@ -2607,13 +2823,10 @@ const server =
                     <br>
 
                     <input
-                      type="url"
-                      name="image"
-                      value="${escapeHtml(
-                        product.image || ""
-                      )}"
-                      placeholder="https://example.com/image.jpg"
-                    >
+  type="file"
+  name="image"
+  accept="image/jpeg,image/png,image/webp,image/gif"
+>
                   </p>
 
                   <p>
@@ -2669,8 +2882,17 @@ const server =
             );
 
 
-          const params =
-            await readBody(req);
+          const contentType =
+  req.headers["content-type"] || "";
+
+const rawBody =
+  await readRawBody(req);
+
+const params =
+  parseMultipartBody(
+    rawBody,
+    contentType
+  );
 
 
           const name =
@@ -2688,9 +2910,11 @@ const server =
             params.get("description")
               ?.trim() || "";
 
-          const image =
-            params.get("image")
-              ?.trim() || "";
+          const imageFile =
+  params.getFile("image");
+
+const image =
+  saveUploadedImage(imageFile);
 
           const categoryIds =
             params
@@ -2737,15 +2961,13 @@ const server =
 
             WHERE id = ?
           `).run(
-                        name,
-            price,
-            description,
-            categoryIds[0] ||
-            null,
-            image,
-            sku,
-            brand,
-          );
+  name,
+  price,
+  description,
+  categoryIds[0] || null,
+  image,
+  id
+);
 
 
           saveProductCategories(
