@@ -230,6 +230,13 @@ function readRawBody(req) {
 }
 
 function parseMultipartBody(buffer, contentType) {
+console.log("CONTENT TYPE:", contentType);
+console.log("BODY SIZE:", buffer.length);
+console.log(
+  "BODY START:",
+  buffer.toString("latin1").slice(0, 500)
+);
+
   const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
 
   if (!match) {
@@ -271,8 +278,8 @@ function parseMultipartBody(buffer, contentType) {
 
     const dispositionMatch =
       headersText.match(
-        /Content-Disposition:[^\r\n]*name="([^"]+)"(?:;\s*filename="([^"]*)")?/i
-      );
+    /Content-Disposition:\s*form-data;\s*name="([^"]+)"(?:;\s*filename="([^"]*)")?/i
+  );
 
     if (!dispositionMatch) {
       continue;
@@ -311,6 +318,8 @@ function parseMultipartBody(buffer, contentType) {
 );
   }
 
+  console.log("FIELDS FOUND:", [...fields.keys()]);
+
   return {
     get(name) {
       return fields.get(name) || "";
@@ -329,6 +338,8 @@ function parseMultipartBody(buffer, contentType) {
 }
 
 function saveUploadedImage(file) {
+  console.log("UPLOAD FILE:", file);
+
   if (!file || !file.filename || !file.data.length) {
     return "";
   }
@@ -359,7 +370,7 @@ function saveUploadedImage(file) {
   }
 
   const uploadsDir =
-    path.join(
+    pathModule.join(
       process.cwd(),
       "uploads"
     );
@@ -375,10 +386,10 @@ function saveUploadedImage(file) {
     `${randomBytes(16).toString("hex")}${extension}`;
 
   const filePath =
-    path.join(
-      uploadsDir,
-      filename
-    );
+  pathModule.join(
+    uploadsDir,
+    filename
+  );
 
   writeFileSync(
     filePath,
@@ -393,7 +404,7 @@ async function saveUploadedFile(
   buffer
 ) {
   const safeName =
-    path.basename(fileName);
+    pathModule.basename(fileName);
 
   if (!safeName) {
     throw new Error(
@@ -430,7 +441,7 @@ async function saveUploadedFile(
     ).toString("hex")}${extension}`;
 
   const filePath =
-    path.join(
+    pathModule.join(
       UPLOADS_DIR,
       uniqueName
     );
@@ -1337,6 +1348,26 @@ const server =
               path.split("/")[2]
             );
 
+            const existingProduct =
+  db.prepare(`
+    SELECT image
+    FROM products
+    WHERE id = ?
+  `).get(id);
+
+if (!existingProduct) {
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      "Товар не найден",
+      `
+        <h1>Товар не найден</h1>
+      `
+    ),
+    404
+  );
+}
 
           const product =
             db.prepare(`
@@ -2471,7 +2502,6 @@ const server =
   name="image"
   accept="image/jpeg,image/png,image/webp,image/gif"
 >
-                    >
                   </p>
 
                   <p>
@@ -2580,11 +2610,20 @@ const params =
             params.get("description")
               ?.trim() || "";
 
-          const imageFile =
+const existingProduct =
+  db.prepare(`
+    SELECT image
+    FROM products
+    WHERE id = ?
+  `).get(id);
+
+const imageFile =
   params.getFile("image");
 
 const image =
-  saveUploadedImage(imageFile);
+  imageFile
+    ? saveUploadedImage(imageFile)
+    : existingProduct?.image || "";
 
           const sku =
             params.get("sku")
@@ -2697,6 +2736,12 @@ const image =
               path.split("/")[2]
             );
 
+            const existingProduct =
+  db.prepare(`
+    SELECT image
+    FROM products
+    WHERE id = ?
+  `).get(id);
 
           const product =
             db.prepare(`
@@ -2855,133 +2900,88 @@ const image =
           );
         }
 
-
         // ==================================================
-        // РЕДАКТИРОВАТЬ ТОВАР — POST
-        // ТОЛЬКО АДМИН
-        // ==================================================
+// РЕДАКТИРОВАТЬ ТОВАР — POST
+// ТОЛЬКО АДМИН
+// ==================================================
 
-        if (
-          req.method === "POST" &&
-          /^\/edit-product\/\d+$/.test(path)
-        ) {
+if (
+  req.method === "POST" &&
+  /^\/edit-product\/\d+$/.test(path)
+) {
+  if (!requireAdmin(req, res)) {
+    return;
+  }
 
-          if (
-            !requireAdmin(
-              req,
-              res
-            )
-          ) {
-            return;
-          }
+  const id = Number(path.split("/")[2]);
 
+  const contentType = req.headers["content-type"] || "";
+  const rawBody = await readRawBody(req);
+  const params = parseMultipartBody(rawBody, contentType);
 
-          const id =
-            Number(
-              path.split("/")[2]
-            );
+  const existingProduct =
+    db.prepare(`
+      SELECT *
+      FROM products
+      WHERE id = ?
+    `).get(id);
 
+  if (!existingProduct) {
+    return sendHtml(
+      res,
+      renderPage(
+        req,
+        "Товар не найден",
+        `<h1>Товар не найден</h1>`
+      ),
+      404
+    );
+  }
 
-          const contentType =
-  req.headers["content-type"] || "";
+  const name = params.get("name")?.trim() || "";
+  const price = Number(params.get("price"));
+  const description = params.get("description")?.trim() || "";
+  const sku = params.get("sku")?.trim() || "";
+  const brand = params.get("brand")?.trim() || "";
 
-const rawBody =
-  await readRawBody(req);
+  const categoryIds = params
+    .getAll("category_ids")
+    .map(Number)
+    .filter(Boolean);
 
-const params =
-  parseMultipartBody(
-    rawBody,
-    contentType
+  const imageFile = params.getFile("image");
+
+  const image =
+    imageFile
+      ? saveUploadedImage(imageFile)
+      : existingProduct.image || "";
+
+  db.prepare(`
+    UPDATE products
+    SET
+      name = ?,
+      price = ?,
+      description = ?,
+      sku = ?,
+      brand = ?,
+      category_id = ?,
+      image = ?
+    WHERE id = ?
+  `).run(
+    name,
+    price,
+    description,
+    sku,
+    brand,
+    categoryIds[0] || null,
+    image,
+    id
   );
 
+  saveProductCategories(id, categoryIds);
 
-          const name =
-            params.get("name")
-              ?.trim() || "";
-
-
-          const price =
-            Number(
-              params.get("price")
-            );
-
-
-          const description =
-            params.get("description")
-              ?.trim() || "";
-
-          const imageFile =
-  params.getFile("image");
-
-const image =
-  saveUploadedImage(imageFile);
-
-          const categoryIds =
-            params
-              .getAll("category_ids")
-              .map(Number)
-              .filter(
-                Number.isInteger
-              );
-
-
-          if (
-            !name ||
-            !Number.isFinite(price) ||
-            price < 0 ||
-            !description
-          ) {
-
-            return sendHtml(
-              res,
-              renderPage(
-                req,
-                "Ошибка",
-                `
-                  <h1>
-                    Заполните
-                    все поля правильно.
-                  </h1>
-                `
-              ),
-              400
-            );
-          }
-
-
-          db.prepare(`
-            UPDATE products
-
-            SET
-              name = ?,
-              price = ?,
-              description = ?,
-              category_id = ?,
-              image = ?
-
-            WHERE id = ?
-          `).run(
-  name,
-  price,
-  description,
-  categoryIds[0] || null,
-  image,
-  id
-);
-
-
-          saveProductCategories(
-            id,
-            categoryIds
-          );
-
-
-          return redirect(
-            res,
-            "/catalog"
-          );
-        }
-
+  return redirect(res, "/catalog");
+}
 
         // ==================================================
         // УДАЛИТЬ ТОВАР
