@@ -309,27 +309,29 @@ console.log(
       continue;
     }
 
-    fields.set(
-  name,
+    const value =
   Buffer.from(
     contentText.replace(/\r\n$/, ""),
     "latin1"
-  ).toString("utf8")
-);
-  }
+  ).toString("utf8");
 
+if (!fields.has(name)) {
+  fields.set(name, []);
+}
+
+fields.get(name).push(value);
+  }
   console.log("FIELDS FOUND:", [...fields.keys()]);
 
   return {
     get(name) {
-      return fields.get(name) || "";
-    },
+  const values = fields.get(name) || [];
+  return values[0] || "";
+},
 
-    getAll(name) {
-      return [...fields.entries()]
-        .filter(([key]) => key === name)
-        .map(([, value]) => value);
-    },
+getAll(name) {
+  return fields.get(name) || [];
+},
 
     getFile(name) {
       return files.get(name) || null;
@@ -1241,8 +1243,22 @@ const server =
                   </a>
 
                   —
-                  ${product.price}
-                  руб.
+                                    ${
+                    product.price_on_request
+                      ? "Цена по запросу"
+                      : `${product.price} ${product.currency}`
+                  }
+
+                   <br>
+
+                  Наличие:
+                  ${
+                    product.availability === "in_stock"
+                      ? "В наличии"
+                      : product.availability === "on_order"
+                        ? "Под заказ"
+                        : "Нет в наличии"
+                  }
 
                   ${
                     names.length
@@ -1348,27 +1364,6 @@ const server =
               path.split("/")[2]
             );
 
-            const existingProduct =
-  db.prepare(`
-    SELECT image
-    FROM products
-    WHERE id = ?
-  `).get(id);
-
-if (!existingProduct) {
-  return sendHtml(
-    res,
-    renderPage(
-      req,
-      "Товар не найден",
-      `
-        <h1>Товар не найден</h1>
-      `
-    ),
-    404
-  );
-}
-
           const product =
             db.prepare(`
               SELECT *
@@ -1440,9 +1435,20 @@ if (!existingProduct) {
                   <strong>
 
                     ${product.price}
-                    руб.
+                    ${product.currency}
                   </strong>
                 </p>
+
+                <br>
+
+                Наличие:
+                ${
+                  product.availability === "in_stock"
+                    ? "В наличии"
+                    : product.availability === "on_order"
+                      ? "Под заказ"
+                      : "Нет в наличии"
+                }
 
                 <p>
                   ${escapeHtml(
@@ -2482,6 +2488,16 @@ if (!existingProduct) {
                   </p>
 
                   <p>
+                    Цена по запросу:
+
+                    <input
+                      type="checkbox"
+                      name="price_on_request"
+                      value="1"
+                    >
+                  </p>
+
+                  <p>
                     Описание:
 
                     <br>
@@ -2526,6 +2542,26 @@ if (!existingProduct) {
                       name="brand"
                       placeholder="Например: DEWALT"
                     >
+                  </p>
+
+                                    <p>
+                    Валюта:
+
+                    <select name="currency">
+                      <option value="BYN">BYN</option>
+                      <option value="USD">USD</option>
+                    </select>
+                  </p>
+
+
+                  <p>
+                    Наличие:
+
+                    <select name="availability">
+                      <option value="in_stock">В наличии</option>
+                      <option value="on_order">Под заказ</option>
+                      <option value="out_of_stock">Нет в наличии</option>
+                    </select>
                   </p>
 
                   <p>
@@ -2610,20 +2646,13 @@ const params =
             params.get("description")
               ?.trim() || "";
 
-const existingProduct =
-  db.prepare(`
-    SELECT image
-    FROM products
-    WHERE id = ?
-  `).get(id);
-
 const imageFile =
   params.getFile("image");
 
 const image =
   imageFile
     ? saveUploadedImage(imageFile)
-    : existingProduct?.image || "";
+    : "";
 
           const sku =
             params.get("sku")
@@ -2632,6 +2661,17 @@ const image =
           const brand =
             params.get("brand")
               ?.trim() || "";
+
+              const currency =
+          params.get("currency") || "BYN";
+
+              const availability =
+          params.get("availability") || "in_stock";
+
+                  const priceOnRequest =
+          params.get("price_on_request") === "1"
+            ? 1
+            : 0;
 
           const categoryIds =
             params
@@ -2669,17 +2709,20 @@ const image =
           const result =
             db.prepare(`
               INSERT INTO products
-              (
-                name,
-                price,
-                description,
-                category_id,
-                image,
-                sku,
-                brand
-              )
+(
+  name,
+  price,
+  description,
+  category_id,
+  image,
+  sku,
+  brand,
+  currency,
+  availability,
+  price_on_request
+)
               
-              VALUES (?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
   name,
   price,
@@ -2688,7 +2731,10 @@ const image =
   null,
   image,
   sku,
-  brand
+  brand,
+  currency,
+  availability,
+  priceOnRequest
 );
 
 
@@ -2735,13 +2781,6 @@ const image =
             Number(
               path.split("/")[2]
             );
-
-            const existingProduct =
-  db.prepare(`
-    SELECT image
-    FROM products
-    WHERE id = ?
-  `).get(id);
 
           const product =
             db.prepare(`
@@ -2837,7 +2876,7 @@ const image =
                   </p>
 
                   <p>
-                    Цена:
+                    Цена: 
 
                     <input
                       type="number"
@@ -2847,6 +2886,88 @@ const image =
                       required
                     >
                   </p>
+
+                  <p>
+                    Цена по запросу:
+                    
+                    <input
+                      type="checkbox"
+                      name="price_on_request"
+                      value="1"
+                      ${
+                        product.price_on_request
+                          ? "checked"
+                          : ""
+                      }
+                    >
+                  </p>
+
+                  <p>
+                    Валюта:
+
+                    <select name="currency">
+                      <option
+                        value="BYN"
+                        ${
+                          product.currency === "BYN"
+                            ? "selected"
+                            : ""
+                        }
+                      >
+                        BYN
+                      </option>
+
+                      <option
+                        value="USD"
+                        ${
+                          product.currency === "USD"
+                            ? "selected"
+                            : ""
+                        }
+                      >
+                        USD
+                      </option>
+                    </select>
+                  </p>
+
+                        <p>
+                  Наличие:
+
+                  <select name="availability">
+                    <option
+                      value="in_stock"
+                      ${
+                        product.availability === "in_stock"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      В наличии
+                    </option>
+
+                    <option
+                      value="on_order"
+                      ${
+                        product.availability === "on_order"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      Под заказ
+                    </option>
+
+                    <option
+                      value="out_of_stock"
+                      ${
+                        product.availability === "out_of_stock"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      Нет в наличии
+                    </option>
+                  </select>
+                </p>
 
                   <p>
                     Описание:
@@ -2943,6 +3064,16 @@ if (
   const description = params.get("description")?.trim() || "";
   const sku = params.get("sku")?.trim() || "";
   const brand = params.get("brand")?.trim() || "";
+  const currency =
+  params.get("currency") || "BYN";
+
+const availability =
+  params.get("availability") || "in_stock";
+
+  const priceOnRequest =
+  params.get("price_on_request") === "1"
+    ? 1
+    : 0;
 
   const categoryIds = params
     .getAll("category_ids")
@@ -2965,8 +3096,10 @@ if (
       sku = ?,
       brand = ?,
       category_id = ?,
-      image = ?
-    WHERE id = ?
+      image = ?,
+      currency = ?,
+      availability = ?
+
   `).run(
     name,
     price,
@@ -2975,6 +3108,8 @@ if (
     brand,
     categoryIds[0] || null,
     image,
+    currency,
+    availability,
     id
   );
 
