@@ -1246,7 +1246,7 @@ const server =
                                     ${
                     product.price_on_request
                       ? "Цена по запросу"
-                      : `${product.price} ${product.currency}`
+                      : `${product.price} ${product.currency} / ${product.unit}`
                   }
 
                    <br>
@@ -1433,9 +1433,11 @@ const server =
 
                 <p>
                   <strong>
-
-                    ${product.price}
-                    ${product.currency}
+                ${
+                  product.price_on_request
+                    ? "Цена по запросу"
+                    : `${product.price} ${product.currency} / ${product.unit}`
+                }
                   </strong>
                 </p>
 
@@ -2498,6 +2500,41 @@ const server =
                   </p>
 
                   <p>
+                  Скидка (%):
+                  <input
+                    type="number"
+                    name="discount_percent"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value="0"
+                  >
+                </p>
+
+                  <p>
+                    Единица измерения:
+
+                 <select name="unit">
+                  <option value="шт." selected>шт. — штука</option>
+                  <option value="компл.">компл. — комплект</option>
+                  <option value="кг">кг — килограмм</option>
+                  <option value="г">г — грамм</option>
+                  <option value="т">т — тонна</option>
+                  <option value="м">м — метр</option>
+                  <option value="см">см — сантиметр</option>
+                  <option value="мм">мм — миллиметр</option>
+                  <option value="км">км — километр</option>
+                  <option value="м²">м² — квадратный метр</option>
+                  <option value="см²">см² — квадратный сантиметр</option>
+                  <option value="м³">м³ — кубический метр</option>
+                  <option value="л">л — литр</option>
+                  <option value="мл">мл — миллилитр</option>
+                  <option value="ч">ч — час</option>
+                  <option value="мин">мин — минута</option>
+                  </select>
+                  </p>
+
+                  <p>
                     Описание:
 
                     <br>
@@ -2673,6 +2710,11 @@ const image =
             ? 1
             : 0;
 
+        const discountPercent =
+          Number(params.get("discount_percent")) || 0;
+
+        const unit =
+          params.get("unit") || "шт.";
           const categoryIds =
             params
               .getAll("category_ids")
@@ -2709,33 +2751,37 @@ const image =
           const result =
             db.prepare(`
               INSERT INTO products
-(
-  name,
-  price,
-  description,
-  category_id,
-  image,
-  sku,
-  brand,
-  currency,
-  availability,
-  price_on_request
-)
+            (
+              name,
+              price,
+              description,
+              category_id,
+              image,
+              sku,
+              brand,
+              currency,
+              availability,
+              price_on_request,
+              unit,
+              discount_percent
+            )
               
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
-  name,
-  price,
-  description,
-  categoryIds[0] ||
-  null,
-  image,
-  sku,
-  brand,
-  currency,
-  availability,
-  priceOnRequest
-);
+            name,
+            price,
+            description,
+            categoryIds[0] ||
+            null,
+            image,
+            sku,
+            brand,
+            currency,
+            availability,
+            priceOnRequest,
+            unit,
+            discountPercent
+          );
 
 
           const productId =
@@ -2889,7 +2935,7 @@ const image =
 
                   <p>
                     Цена по запросу:
-                    
+
                     <input
                       type="checkbox"
                       name="price_on_request"
@@ -2901,6 +2947,188 @@ const image =
                       }
                     >
                   </p>
+
+                  <p>
+                  Единица измерения:
+
+                  <select name="unit">
+                    <option
+                      value="шт."
+                      ${
+                        product.unit === "шт."
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      шт. — штука
+                    </option>
+
+                    <option
+                      value="компл."
+                      ${
+                        product.unit === "компл."
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      компл. — комплект
+                    </option>
+
+                    <option
+                      value="кг"
+                      ${
+                        product.unit === "кг"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      кг — килограмм
+                    </option>
+
+                    <option
+                      value="г"
+                      ${
+                        product.unit === "г"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      г — грамм
+                    </option>
+
+                    <option
+                      value="т"
+                      ${
+                        product.unit === "т"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      т — тонна
+                    </option>
+
+                    <option
+                      value="м"
+                      ${
+                        product.unit === "м"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      м — метр
+                    </option>
+
+                    <option
+                      value="см"
+                      ${
+                        product.unit === "см"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      см — сантиметр
+                    </option>
+
+                    <option
+                      value="мм"
+                      ${
+                        product.unit === "мм"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      мм — миллиметр
+                    </option>
+
+                    <option
+                      value="км"
+                      ${
+                        product.unit === "км"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      км — километр
+                    </option>
+
+                    <option
+                      value="м²"
+                      ${
+                        product.unit === "м²"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      м² — квадратный метр
+                    </option>
+
+                    <option
+                      value="см²"
+                      ${
+                        product.unit === "см²"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      см² — квадратный сантиметр
+                    </option>
+
+                    <option
+                      value="м³"
+                      ${
+                        product.unit === "м³"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      м³ — кубический метр
+                    </option>
+
+                    <option
+                      value="л"
+                      ${
+                        product.unit === "л"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      л — литр
+                    </option>
+
+                    <option
+                      value="мл"
+                      ${
+                        product.unit === "мл"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      мл — миллилитр
+                    </option>
+
+                    <option
+                      value="ч"
+                      ${
+                        product.unit === "ч"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      ч — час
+                    </option>
+
+                    <option
+                      value="мин"
+                      ${
+                        product.unit === "мин"
+                          ? "selected"
+                          : ""
+                      }
+                    >
+                      мин — минута
+                    </option>
+                  </select>
+                </p>
 
                   <p>
                     Валюта:
@@ -3075,6 +3303,12 @@ const availability =
     ? 1
     : 0;
 
+    const discountPercent =
+  Number(params.get("discount_percent")) || 0;
+
+    const unit =
+  params.get("unit") || "шт.";
+
   const categoryIds = params
     .getAll("category_ids")
     .map(Number)
@@ -3098,7 +3332,11 @@ const availability =
       category_id = ?,
       image = ?,
       currency = ?,
-      availability = ?
+      availability = ?,
+      price_on_request = ?,
+      unit = ?,
+      discount_percent = ?
+      WHERE id = ?
 
   `).run(
     name,
@@ -3110,7 +3348,10 @@ const availability =
     image,
     currency,
     availability,
-    id
+    priceOnRequest,
+    unit,
+    discountPercent,
+    id,
   );
 
   saveProductCategories(id, categoryIds);
