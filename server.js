@@ -796,8 +796,9 @@ function getCartItems(req) {
       ...product,
       quantity,
       sum:
-        product.price *
-        quantity
+  product.price *
+  quantity *
+  (1 - (Number(product.discount_percent) || 0) / 100)
     });
   }
 
@@ -1225,6 +1226,14 @@ const server =
               of products
             ) {
 
+              const discountPercent =
+                Number(product.discount_percent) || 0;
+
+              const discountedPrice =
+                discountPercent > 0
+                  ? product.price * (1 - discountPercent / 100)
+                  : product.price;
+
               const names =
                 getProductCategoryNames(
                   product.id
@@ -1243,10 +1252,12 @@ const server =
                   </a>
 
                   —
-                                    ${
+                               ${
                     product.price_on_request
                       ? "Цена по запросу"
-                      : `${product.price} ${product.currency} / ${product.unit}`
+                      : discountPercent > 0
+                        ? `<s>${product.price} ${product.currency}</s> → ${discountedPrice} ${product.currency} / ${product.unit} (−${discountPercent}%)`
+                        : `${product.price} ${product.currency} / ${product.unit}`
                   }
 
                    <br>
@@ -1401,6 +1412,13 @@ const server =
               id
             );
 
+          const discountPercent =
+  Number(product.discount_percent) || 0;
+
+const discountedPrice =
+  discountPercent > 0
+    ? product.price * (1 - discountPercent / 100)
+    : product.price;
 
           return sendHtml(
             res,
@@ -1434,10 +1452,12 @@ const server =
                 <p>
                   <strong>
                 ${
-                  product.price_on_request
-                    ? "Цена по запросу"
-                    : `${product.price} ${product.currency} / ${product.unit}`
-                }
+  product.price_on_request
+    ? "Цена по запросу"
+    : discountPercent > 0
+      ? `<s>${product.price} ${product.currency}</s> → ${discountedPrice} ${product.currency} / ${product.unit} (−${discountPercent}%)`
+      : `${product.price} ${product.currency} / ${product.unit}`
+}
                   </strong>
                 </p>
 
@@ -1557,15 +1577,18 @@ const server =
                 )}
 
                 —
-                ${item.price}
-                руб.
+                ${
+  Number(item.discount_percent) > 0
+    ? `<s>${item.price} ${item.currency}</s> → ${item.price * (1 - item.discount_percent / 100)} ${item.currency}`
+    : `${item.price} ${item.currency}`
+}
 
                 ×
                 ${item.quantity}
 
                 =
                 ${item.sum}
-                руб.
+                ${item.currency}
 
                 <a
                   href="/cart/remove/${item.id}"
@@ -1597,8 +1620,8 @@ const server =
                 <p>
                   <strong>
                     Итого:
-                    ${total}
-                    руб.
+                  ${total}
+                  ${items[0].currency}
                   </strong>
                 </p>
 
@@ -2507,7 +2530,7 @@ const server =
                     min="0"
                     max="100"
                     step="1"
-                    value="0"
+                    value="${product.discount_percent || 0}"
                   >
                 </p>
 
@@ -2930,6 +2953,19 @@ const image =
                       min="0"
                       value="${product.price}"
                       required
+                    >
+                  </p>
+
+                  <p>
+                    Скидка (%):
+
+                    <input
+                      type="number"
+                      name="discount_percent"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value="${product.discount_percent || 0}"
                     >
                   </p>
 
