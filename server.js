@@ -725,6 +725,36 @@ function getProductCategoryNames(
     .map(row => row.name);
 }
 
+function getProductCharacteristics(
+  productId
+) {
+  return db
+    .prepare(`
+      SELECT
+        c.name,
+        pc.value
+      FROM product_characteristics pc
+
+      JOIN characteristics c
+        ON c.id = pc.characteristic_id
+
+      WHERE pc.product_id = ?
+
+      ORDER BY
+        c.id
+    `)
+    .all(productId);
+}
+
+function getCharacteristics() {
+  return db
+    .prepare(`
+      SELECT *
+      FROM characteristics
+      ORDER BY id
+    `)
+    .all();
+}
 
 // ======================================================
 // КОРЗИНА
@@ -1021,12 +1051,123 @@ const server =
                   </li>
 
                   <li>
+                    <a href="/admin/characteristics">
+                      Управление характеристиками
+                    </a>
+                  </li>
+
+                  <li>
                     <a href="/orders">
                       Заказы
                     </a>
                   </li>
 
                 </ul>
+              `
+            )
+          );
+        }
+
+
+         // ==================================================
+        // ХАРАКТЕРИСТИКИ — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/characteristics"
+        ) {
+
+          if (
+            !requireAdmin(
+              req,
+              res
+            )
+          ) {
+            return;
+          }
+
+          const characteristics =
+            getCharacteristics();
+
+          let characteristicsHtml =
+            "";
+
+          for (
+            const characteristic
+            of characteristics
+          ) {
+
+            characteristicsHtml += `
+              <li>
+                ${escapeHtml(
+                  characteristic.name
+                )}
+
+                ${
+                  characteristic.is_filter
+                    ? "(фильтр)"
+                    : ""
+                }
+              </li>
+            `;
+          }
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Управление характеристиками",
+              `
+                <h1>
+                  Управление характеристиками
+                </h1>
+
+                <form
+                  method="POST"
+                  action="/admin/characteristics"
+                >
+
+                  <p>
+                    Название характеристики:
+
+                    <input
+                      type="text"
+                      name="name"
+                      required
+                    >
+                  </p>
+
+                  <p>
+                    Использовать как фильтр:
+
+                    <input
+                      type="checkbox"
+                      name="is_filter"
+                      value="1"
+                    >
+                  </p>
+
+                  <button>
+                    Добавить
+                  </button>
+
+                </form>
+
+                <h2>
+                  Существующие характеристики
+                </h2>
+
+                <ul>
+                  ${characteristicsHtml}
+                </ul>
+
+                <p>
+                  <a href="/admin">
+                    Назад в админ-панель
+                  </a>
+                </p>
               `
             )
           );
@@ -1095,6 +1236,62 @@ const server =
           return redirect(
             res,
             "/admin"
+          );
+        }
+
+
+                // ==================================================
+        // ХАРАКТЕРИСТИКИ — POST
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path === "/admin/characteristics"
+        ) {
+
+          if (
+            !requireAdmin(
+              req,
+              res
+            )
+          ) {
+            return;
+          }
+
+          const params =
+            await readBody(req);
+
+          const name =
+            params.get("name");
+
+          const isFilter =
+            params.get("is_filter") === "1"
+              ? 1
+              : 0;
+
+          if (!name) {
+            return redirect(
+              res,
+              "/admin/characteristics"
+            );
+          }
+
+          db.prepare(`
+            INSERT INTO characteristics
+            (
+              name,
+              is_filter
+            )
+            VALUES (?, ?)
+          `).run(
+            name,
+            isFilter
+          );
+
+          return redirect(
+            res,
+            "/admin/characteristics"
           );
         }
 
@@ -1239,6 +1436,10 @@ const server =
                   product.id
                 );
 
+              const characteristics =
+                getProductCharacteristics(
+                  product.id
+                );
 
               productsHtml += `
                 <li>
@@ -1412,6 +1613,27 @@ const server =
               id
             );
 
+          const characteristics =
+            getProductCharacteristics(
+              id
+            );
+
+            let characteristicsHtml = "";
+
+          for (
+            const characteristic
+            of characteristics
+          ) {
+            characteristicsHtml += `
+              <p>
+                <strong>
+                  ${escapeHtml(characteristic.name)}:
+                </strong>
+                ${escapeHtml(characteristic.value || "")}
+              </p>
+            `;
+          }
+
           const discountPercent =
   Number(product.discount_percent) || 0;
 
@@ -1478,6 +1700,8 @@ const discountedPrice =
                     ""
                   )}
                 </p>
+
+                ${characteristicsHtml}
 
                 <p>
                   Категории:
@@ -2881,6 +3105,10 @@ const image =
             getCategories();
 
 
+            const characteristics =
+  getCharacteristics();
+
+
           const selectedIds =
             getProductCategoryIds(
               id
@@ -2914,6 +3142,23 @@ const image =
             `;
           }
 
+          let characteristicsHtml = "";
+
+for (
+  const characteristic
+  of characteristics
+) {
+  characteristicsHtml += `
+    <p>
+      ${escapeHtml(characteristic.name)}:
+
+      <input
+        type="text"
+        name="characteristic_${characteristic.id}"
+      >
+    </p>
+  `;
+}
 
           return sendHtml(
             res,
@@ -3233,6 +3478,8 @@ const image =
                   </select>
                 </p>
 
+                  ${characteristicsHtml}  
+
                   <p>
                     Описание:
 
@@ -3345,6 +3592,26 @@ const availability =
     const unit =
   params.get("unit") || "шт.";
 
+  const characteristicValues = [];
+
+for (
+  const characteristic
+  of getCharacteristics()
+) {
+  const value =
+    params
+      .get(`characteristic_${characteristic.id}`)
+      ?.trim() || "";
+
+  if (value) {
+    characteristicValues.push({
+      characteristicId:
+        characteristic.id,
+      value
+    });
+  }
+}
+
   const categoryIds = params
     .getAll("category_ids")
     .map(Number)
@@ -3389,6 +3656,30 @@ const availability =
     discountPercent,
     id,
   );
+
+  db.prepare(`
+    DELETE FROM product_characteristics
+    WHERE product_id = ?
+  `).run(id);
+
+  for (
+    const characteristic
+    of characteristicValues
+  ) {
+    db.prepare(`
+      INSERT INTO product_characteristics
+      (
+        product_id,
+        characteristic_id,
+        value
+      )
+      VALUES (?, ?, ?)
+    `).run(
+      id,
+      characteristic.characteristicId,
+      characteristic.value
+    );
+  }
 
   saveProductCategories(id, categoryIds);
 
