@@ -768,6 +768,20 @@ function getCategoryCharacteristicRows() {
 }
 
 
+function getCategoryCharacteristicIds(
+  categoryId
+) {
+  return db
+    .prepare(`
+      SELECT characteristic_id
+      FROM category_characteristics
+      WHERE category_id = ?
+    `)
+    .all(categoryId)
+    .map(row => row.characteristic_id);
+}
+
+
 function getCharacteristicsForCategoryIds(
   categoryIds
 ) {
@@ -798,6 +812,86 @@ function getCharacteristicsForCategoryIds(
       ORDER BY c.id
     `)
     .all(...ids);
+}
+
+
+function getCatalogFilterData(
+  categoryId
+) {
+  if (!Number.isInteger(categoryId)) {
+    return [];
+  }
+
+  const characteristics = db
+    .prepare(`
+      SELECT
+        c.id,
+        c.name
+      FROM category_characteristics cc
+
+      JOIN characteristics c
+        ON c.id = cc.characteristic_id
+
+      WHERE
+        cc.category_id = ?
+        AND c.is_filter = 1
+
+      ORDER BY c.id
+    `)
+    .all(categoryId);
+
+  if (characteristics.length === 0) {
+    return [];
+  }
+
+  const characteristicIds = characteristics.map(
+    characteristic => characteristic.id
+  );
+  const placeholders = characteristicIds
+    .map(() => "?")
+    .join(", ");
+
+  const values = db
+    .prepare(`
+      SELECT DISTINCT
+        pc.characteristic_id,
+        pc.value
+      FROM product_characteristics pc
+
+      JOIN products p
+        ON p.id = pc.product_id
+
+      LEFT JOIN product_categories productCategory
+        ON productCategory.product_id = p.id
+
+      WHERE
+        pc.characteristic_id IN (${placeholders})
+        AND TRIM(pc.value) <> ''
+        AND (
+          p.category_id = ?
+          OR productCategory.category_id = ?
+        )
+
+      ORDER BY
+        pc.characteristic_id,
+        pc.value
+    `)
+    .all(
+      ...characteristicIds,
+      categoryId,
+      categoryId
+    );
+
+  return characteristics.map(characteristic => ({
+    ...characteristic,
+    values: values
+      .filter(
+        value =>
+          value.characteristic_id ===
+          characteristic.id
+      )
+      .map(value => value.value)
+  }));
 }
 
 
@@ -1231,6 +1325,12 @@ const server =
                   </li>
 
                   <li>
+                    <a href="/admin/category-characteristics">
+                      Характеристики категорий
+                    </a>
+                  </li>
+
+                  <li>
                     <a href="/orders">
                       Заказы
                     </a>
@@ -1471,6 +1571,284 @@ const server =
 
 
         // ==================================================
+        // ХАРАКТЕРИСТИКИ КАТЕГОРИЙ — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/category-characteristics"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const categories = getCategories();
+          const characteristics = getCharacteristics();
+          const categoryParam =
+            url.searchParams.get("category");
+
+          let selectedCategory = null;
+
+          if (categoryParam) {
+            const categoryId = Number(categoryParam);
+
+            selectedCategory = categories.find(
+              category => category.id === categoryId
+            );
+
+            if (!selectedCategory) {
+              return sendHtml(
+                res,
+                renderPage(
+                  req,
+                  "Категория не найдена",
+                  `<h1>Категория не найдена.</h1>`
+                ),
+                404
+              );
+            }
+          } else {
+            selectedCategory = categories[0] || null;
+          }
+
+          let categoryOptions = "";
+
+          for (const category of categories) {
+            categoryOptions += `
+              <option
+                value="${category.id}"
+                ${
+                  selectedCategory &&
+                  category.id === selectedCategory.id
+                    ? "selected"
+                    : ""
+                }
+              >
+                ${escapeHtml(category.name)}
+              </option>
+            `;
+          }
+
+          const selectedCharacteristicIds =
+            selectedCategory
+              ? getCategoryCharacteristicIds(
+                  selectedCategory.id
+                )
+              : [];
+
+          let characteristicsHtml = "";
+
+          for (const characteristic of characteristics) {
+            characteristicsHtml += `
+              <p>
+                <label>
+                  <input
+                    type="checkbox"
+                    name="characteristic_ids"
+                    value="${characteristic.id}"
+                    ${
+                      selectedCharacteristicIds.includes(
+                        characteristic.id
+                      )
+                        ? "checked"
+                        : ""
+                    }
+                  >
+                  ${escapeHtml(characteristic.name)}
+                </label>
+              </p>
+            `;
+          }
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Характеристики категорий",
+              `
+                <h1>
+                  Характеристики категорий
+                </h1>
+
+                <p>
+                  <a href="/admin">
+                    ← Назад в админ-панель
+                  </a>
+                </p>
+
+                <form
+                  method="GET"
+                  action="/admin/category-characteristics"
+                >
+                  <p>
+                    Категория:
+
+                    <select name="category">
+                      ${categoryOptions}
+                    </select>
+
+                    <button>
+                      Выбрать
+                    </button>
+                  </p>
+                </form>
+
+                ${
+                  selectedCategory
+                    ? `
+                      <form
+                        method="POST"
+                        action="/admin/category-characteristics"
+                      >
+                        <input
+                          type="hidden"
+                          name="category_id"
+                          value="${selectedCategory.id}"
+                        >
+
+                        <h2>
+                          ${escapeHtml(
+                            selectedCategory.name
+                          )}
+                        </h2>
+
+                        ${
+                          characteristicsHtml ||
+                          "<p>Характеристик пока нет.</p>"
+                        }
+
+                        <button>
+                          Сохранить назначения
+                        </button>
+                      </form>
+                    `
+                    : "<p>Категорий пока нет.</p>"
+                }
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // ХАРАКТЕРИСТИКИ КАТЕГОРИЙ — POST
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path === "/admin/category-characteristics"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const params = await readBody(req);
+          const categoryId = Number(
+            params.get("category_id")
+          );
+          const category = getCategories().find(
+            item => item.id === categoryId
+          );
+
+          if (!Number.isInteger(categoryId) || !category) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Выберите существующую категорию.</h1>`
+              ),
+              400
+            );
+          }
+
+          const submittedCharacteristicIds =
+            params.getAll("characteristic_ids");
+
+          const characteristicIds =
+            submittedCharacteristicIds.map(Number);
+
+          if (
+            characteristicIds.some(
+              characteristicId =>
+                !Number.isInteger(characteristicId)
+            )
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Некорректная характеристика.</h1>`
+              ),
+              400
+            );
+          }
+
+          const availableCharacteristicIds = new Set(
+            getCharacteristics().map(
+              characteristic => characteristic.id
+            )
+          );
+
+          if (
+            characteristicIds.some(
+              characteristicId =>
+                !availableCharacteristicIds.has(
+                  characteristicId
+                )
+            )
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Выбрана несуществующая характеристика.</h1>`
+              ),
+              400
+            );
+          }
+
+          const uniqueCharacteristicIds = [
+            ...new Set(characteristicIds)
+          ];
+
+          db.exec("BEGIN");
+
+          try {
+            db.prepare(`
+              DELETE FROM category_characteristics
+              WHERE category_id = ?
+            `).run(categoryId);
+
+            const insert = db.prepare(`
+              INSERT INTO category_characteristics
+              (
+                category_id,
+                characteristic_id
+              )
+              VALUES (?, ?)
+            `);
+
+            for (const characteristicId of uniqueCharacteristicIds) {
+              insert.run(categoryId, characteristicId);
+            }
+
+            db.exec("COMMIT");
+          } catch (error) {
+            db.exec("ROLLBACK");
+            throw error;
+          }
+
+          return redirect(
+            res,
+            `/admin/category-characteristics?category=${categoryId}`
+          );
+        }
+
+        // ==================================================
         // АДМИН — LOGOUT
         // ==================================================
 
@@ -1509,6 +1887,13 @@ const server =
             url.searchParams.get(
               "category"
             );
+
+          const catalogFilterData =
+            categoryFilter
+              ? getCatalogFilterData(
+                  Number(categoryFilter)
+                )
+              : [];
 
 
           let products;
@@ -1571,6 +1956,69 @@ const server =
                   category.name
                 )}
               </a>
+            `;
+          }
+
+          let filtersHtml = "";
+
+          if (catalogFilterData.length > 0) {
+            let filterFieldsHtml = "";
+
+            for (const characteristic of catalogFilterData) {
+              const parameterName =
+                `filter_${characteristic.id}`;
+              const selectedValues =
+                url.searchParams.getAll(parameterName);
+
+              let valuesHtml = "";
+
+              for (const value of characteristic.values) {
+                valuesHtml += `
+                  <label>
+                    <input
+                      type="checkbox"
+                      name="${parameterName}"
+                      value="${escapeHtml(value)}"
+                      ${
+                        selectedValues.includes(value)
+                          ? "checked"
+                          : ""
+                      }
+                    >
+                    ${escapeHtml(value)}
+                  </label>
+                  <br>
+                `;
+              }
+
+              filterFieldsHtml += `
+                <fieldset>
+                  <legend>
+                    ${escapeHtml(characteristic.name)}
+                  </legend>
+
+                  ${
+                    valuesHtml ||
+                    "<p>Доступных значений пока нет.</p>"
+                  }
+                </fieldset>
+              `;
+            }
+
+            filtersHtml = `
+              <form method="GET" action="/catalog">
+                <input
+                  type="hidden"
+                  name="category"
+                  value="${escapeHtml(categoryFilter)}"
+                >
+
+                ${filterFieldsHtml}
+
+                <button>
+                  Применить фильтры
+                </button>
+              </form>
             `;
           }
 
