@@ -731,6 +731,7 @@ function getProductCharacteristics(
   return db
     .prepare(`
       SELECT
+        c.id,
         c.name,
         pc.value
       FROM product_characteristics pc
@@ -744,6 +745,179 @@ function getProductCharacteristics(
         c.id
     `)
     .all(productId);
+}
+
+
+function getCategoryCharacteristicRows() {
+  return db
+    .prepare(`
+      SELECT
+        c.id,
+        c.name,
+        cc.category_id
+      FROM characteristics c
+
+      JOIN category_characteristics cc
+        ON cc.characteristic_id = c.id
+
+      ORDER BY
+        c.id,
+        cc.category_id
+    `)
+    .all();
+}
+
+
+function getCharacteristicsForCategoryIds(
+  categoryIds
+) {
+  const ids = categoryIds
+    .map(Number)
+    .filter(Number.isInteger);
+
+  if (ids.length === 0) {
+    return [];
+  }
+
+  const placeholders =
+    ids.map(() => "?").join(", ");
+
+  return db
+    .prepare(`
+      SELECT DISTINCT
+        c.id,
+        c.name,
+        c.is_filter
+      FROM characteristics c
+
+      JOIN category_characteristics cc
+        ON cc.characteristic_id = c.id
+
+      WHERE cc.category_id IN (${placeholders})
+
+      ORDER BY c.id
+    `)
+    .all(...ids);
+}
+
+
+function getSubmittedCharacteristicValues(
+  params,
+  characteristics
+) {
+  const values = [];
+
+  for (const characteristic of characteristics) {
+    const value =
+      params
+        .get(`characteristic_${characteristic.id}`)
+        ?.trim() || "";
+
+    if (value) {
+      values.push({
+        characteristicId: characteristic.id,
+        value
+      });
+    }
+  }
+
+  return values;
+}
+
+
+function renderCharacteristicInputs(
+  categoryCharacteristicRows,
+  valuesByCharacteristicId = new Map()
+) {
+  const characteristics = new Map();
+
+  for (const row of categoryCharacteristicRows) {
+    if (!characteristics.has(row.id)) {
+      characteristics.set(row.id, {
+        id: row.id,
+        name: row.name,
+        categoryIds: []
+      });
+    }
+
+    characteristics.get(row.id)
+      .categoryIds.push(row.category_id);
+  }
+
+  let html = "";
+
+  for (const characteristic of characteristics.values()) {
+    html += `
+      <p
+        data-characteristic-category-ids="${characteristic.categoryIds.join(",")}"
+        hidden
+      >
+        ${escapeHtml(characteristic.name)}:
+
+        <input
+          type="text"
+          name="characteristic_${characteristic.id}"
+          value="${escapeHtml(
+            valuesByCharacteristicId.get(
+              characteristic.id
+            ) || ""
+          )}"
+        >
+      </p>
+    `;
+  }
+
+  return html;
+}
+
+
+function renderCharacteristicSelectionScript() {
+  return `
+    <script>
+      (() => {
+        const categorySelect =
+          document.getElementById(
+            "product-categories"
+          );
+
+        const characteristicRows =
+          document.querySelectorAll(
+            "[data-characteristic-category-ids]"
+          );
+
+        if (!categorySelect) {
+          return;
+        }
+
+        function updateCharacteristics() {
+          const selectedIds = new Set(
+            Array.from(
+              categorySelect.selectedOptions
+            ).map(option => option.value)
+          );
+
+          for (const row of characteristicRows) {
+            const categoryIds = row.dataset
+              .characteristicCategoryIds
+              .split(",")
+              .filter(Boolean);
+
+            row.hidden = !categoryIds.some(
+              categoryId =>
+                selectedIds.has(categoryId)
+            );
+          }
+        }
+
+        categorySelect.addEventListener(
+          "change",
+          updateCharacteristics
+        );
+
+        updateCharacteristics();
+      })();
+    </script>
+  `;
 }
 
 function getCharacteristics() {
@@ -1441,6 +1615,22 @@ const server =
                   product.id
                 );
 
+              let characteristicsHtml = "";
+
+              for (
+                const characteristic
+                of characteristics
+              ) {
+                characteristicsHtml += `
+                  <p>
+                    <strong>
+                      ${escapeHtml(characteristic.name)}:
+                    </strong>
+                    ${escapeHtml(characteristic.value || "")}
+                  </p>
+                `;
+              }
+
               productsHtml += `
                 <li>
 
@@ -1486,6 +1676,8 @@ const server =
                     product.description ||
                     ""
                   )}
+
+                  ${characteristicsHtml}
 
                   ${
   product.image
@@ -2698,6 +2890,9 @@ const discountedPrice =
           const cats =
             getCategories();
 
+          const categoryCharacteristicRows =
+            getCategoryCharacteristicRows();
+
 
           return sendHtml(
             res,
@@ -2754,7 +2949,7 @@ const discountedPrice =
                     min="0"
                     max="100"
                     step="1"
-                    value="${product.discount_percent || 0}"
+                    value="0"
                   >
                 </p>
 
@@ -2854,6 +3049,7 @@ const discountedPrice =
                     <br>
 
                     <select
+                      id="product-categories"
                       name="category_ids"
                       multiple
                       size="8"
@@ -2871,11 +3067,17 @@ const discountedPrice =
                     несколько категорий.
                   </p>
 
+                  ${renderCharacteristicInputs(
+                    categoryCharacteristicRows
+                  )}
+
                   <button>
                     Сохранить
                   </button>
 
                 </form>
+
+                ${renderCharacteristicSelectionScript()}
               `
             )
           );
@@ -2970,6 +3172,14 @@ const image =
                 Number.isInteger
               );
 
+          const characteristicValues =
+            getSubmittedCharacteristicValues(
+              params,
+              getCharacteristicsForCategoryIds(
+                categoryIds
+              )
+            );
+
 
           if (
             !name ||
@@ -3042,6 +3252,22 @@ const image =
             categoryIds
           );
 
+          for (const characteristic of characteristicValues) {
+            db.prepare(`
+              INSERT INTO product_characteristics
+              (
+                product_id,
+                characteristic_id,
+                value
+              )
+              VALUES (?, ?, ?)
+            `).run(
+              productId,
+              characteristic.characteristicId,
+              characteristic.value
+            );
+          }
+
 
           return redirect(
             res,
@@ -3104,14 +3330,22 @@ const image =
           const cats =
             getCategories();
 
-
-            const characteristics =
-  getCharacteristics();
-
-
           const selectedIds =
             getProductCategoryIds(
               id
+            );
+
+          const categoryCharacteristicRows =
+            getCategoryCharacteristicRows();
+
+          const valuesByCharacteristicId =
+            new Map(
+              getProductCharacteristics(id).map(
+                characteristic => [
+                  characteristic.id,
+                  characteristic.value || ""
+                ]
+              )
             );
 
 
@@ -3142,23 +3376,11 @@ const image =
             `;
           }
 
-          let characteristicsHtml = "";
-
-for (
-  const characteristic
-  of characteristics
-) {
-  characteristicsHtml += `
-    <p>
-      ${escapeHtml(characteristic.name)}:
-
-      <input
-        type="text"
-        name="characteristic_${characteristic.id}"
-      >
-    </p>
-  `;
-}
+          const characteristicsHtml =
+            renderCharacteristicInputs(
+              categoryCharacteristicRows,
+              valuesByCharacteristicId
+            );
 
           return sendHtml(
             res,
@@ -3512,6 +3734,7 @@ for (
                     <br>
 
                     <select
+                      id="product-categories"
                       name="category_ids"
                       multiple
                       size="8"
@@ -3527,6 +3750,8 @@ for (
                   </button>
 
                 </form>
+
+                ${renderCharacteristicSelectionScript()}
               `
             )
           );
@@ -3592,30 +3817,18 @@ const availability =
     const unit =
   params.get("unit") || "шт.";
 
-  const characteristicValues = [];
-
-for (
-  const characteristic
-  of getCharacteristics()
-) {
-  const value =
-    params
-      .get(`characteristic_${characteristic.id}`)
-      ?.trim() || "";
-
-  if (value) {
-    characteristicValues.push({
-      characteristicId:
-        characteristic.id,
-      value
-    });
-  }
-}
-
   const categoryIds = params
     .getAll("category_ids")
     .map(Number)
     .filter(Boolean);
+
+  const characteristicValues =
+    getSubmittedCharacteristicValues(
+      params,
+      getCharacteristicsForCategoryIds(
+        categoryIds
+      )
+    );
 
   const imageFile = params.getFile("image");
 
