@@ -415,9 +415,9 @@ async function saveUploadedFile(
   }
 
   const extension =
-    path.extname(
-      safeName
-    ).toLowerCase();
+  pathModule.extname(
+    safeName
+  ).toLowerCase();
 
   const allowedExtensions = [
     ".jpg",
@@ -1888,11 +1888,19 @@ const server =
               "category"
             );
 
+
+
             const searchQuery =
   url.searchParams.get("search")?.trim() || "";
 
   const sort =
   url.searchParams.get("sort") || "";
+
+  const priceMin =
+  url.searchParams.get("price_min") || "";
+
+const priceMax =
+  url.searchParams.get("price_max") || "";
 
           const catalogFilterData =
             categoryFilter
@@ -1964,6 +1972,24 @@ for (const characteristic of catalogFilterData) {
       sku.includes(query)
     );
   });
+}
+
+if (priceMin) {
+  const min =
+    Number(priceMin);
+
+  products = products.filter(
+    product => product.price >= min
+  );
+}
+
+if (priceMax) {
+  const max =
+    Number(priceMax);
+
+  products = products.filter(
+    product => product.price <= max
+  );
 }
 
 if (sort === "price_asc") {
@@ -2091,37 +2117,6 @@ if (selectedCharacteristicIds.length > 0) {
                   Применить фильтры
                 </button>
               </form>
-
-              <form method="GET" action="/catalog">
-  <input
-    type="hidden"
-    name="search"
-    value="${escapeHtml(searchQuery)}"
-  >
-
-  <input
-    type="hidden"
-    name="category"
-    value="${escapeHtml(categoryFilter)}"
-  >
-
-  <label>
-    Сортировка:
-    <select name="sort" onchange="this.form.submit()">
-      <option value="" ${sort === "" ? "selected" : ""}>
-        По умолчанию
-      </option>
-
-      <option value="price_asc" ${sort === "price_asc" ? "selected" : ""}>
-        Подешевле
-      </option>
-
-      <option value="price_desc" ${sort === "price_desc" ? "selected" : ""}>
-        Подороже
-      </option>
-    </select>
-  </label>
-</form>
             `;
           }
 
@@ -4275,6 +4270,30 @@ const image =
                     </option>
                   </select>
                 </p>
+
+                 <p>
+                   Артикул:
+
+                   <br>
+
+                   <input
+                     type="text"
+                     name="sku"
+                     value="${escapeHtml(product.sku || "")}"
+                   >
+                 </p>
+
+                 <p>
+                   Бренд / производитель:
+
+                   <br>
+
+                   <input
+                     type="text"
+                     name="brand"
+                     value="${escapeHtml(product.brand || "")}"
+                   >
+                 </p>
 
                   <p>
                     Валюта:
