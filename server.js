@@ -1888,6 +1888,12 @@ const server =
               "category"
             );
 
+            const searchQuery =
+  url.searchParams.get("search")?.trim() || "";
+
+  const sort =
+  url.searchParams.get("sort") || "";
+
           const catalogFilterData =
             categoryFilter
               ? getCatalogFilterData(
@@ -1895,6 +1901,19 @@ const server =
                 )
               : [];
 
+const selectedFilters = {};
+
+for (const characteristic of catalogFilterData) {
+  const parameterName =
+    `filter_${characteristic.id}`;
+
+  const values =
+    url.searchParams.getAll(parameterName);
+
+  if (values.length > 0) {
+    selectedFilters[characteristic.id] = values;
+  }
+}
 
           let products;
 
@@ -1930,6 +1949,59 @@ const server =
 
           }
 
+          if (searchQuery) {
+  const query = searchQuery.toLowerCase();
+
+  products = products.filter(product => {
+    const name =
+      String(product.name || "").toLowerCase();
+
+    const sku =
+      String(product.sku || "").toLowerCase();
+
+    return (
+      name.includes(query) ||
+      sku.includes(query)
+    );
+  });
+}
+
+if (sort === "price_asc") {
+  products.sort(
+    (a, b) => a.price - b.price
+  );
+}
+
+if (sort === "price_desc") {
+  products.sort(
+    (a, b) => b.price - a.price
+  );
+}
+
+          const selectedCharacteristicIds =
+  Object.keys(selectedFilters).map(Number);
+
+if (selectedCharacteristicIds.length > 0) {
+  products = products.filter(product => {
+    const characteristics =
+      getProductCharacteristics(product.id);
+
+    return selectedCharacteristicIds.every(
+      characteristicId => {
+        const selectedValues =
+          selectedFilters[characteristicId];
+
+        return characteristics.some(
+          characteristic =>
+            characteristic.id === characteristicId &&
+            selectedValues.includes(
+              characteristic.value
+            )
+        );
+      }
+    );
+  });
+}
 
           let categoryLinks = `
             <a href="/catalog">
@@ -1992,7 +2064,7 @@ const server =
               }
 
               filterFieldsHtml += `
-                <fieldset>
+                <fieldset style="display: inline-block;">
                   <legend>
                     ${escapeHtml(characteristic.name)}
                   </legend>
@@ -2019,10 +2091,64 @@ const server =
                   Применить фильтры
                 </button>
               </form>
+
+              <form method="GET" action="/catalog">
+  <input
+    type="hidden"
+    name="search"
+    value="${escapeHtml(searchQuery)}"
+  >
+
+  <input
+    type="hidden"
+    name="category"
+    value="${escapeHtml(categoryFilter)}"
+  >
+
+  <label>
+    Сортировка:
+    <select name="sort" onchange="this.form.submit()">
+      <option value="" ${sort === "" ? "selected" : ""}>
+        По умолчанию
+      </option>
+
+      <option value="price_asc" ${sort === "price_asc" ? "selected" : ""}>
+        Подешевле
+      </option>
+
+      <option value="price_desc" ${sort === "price_desc" ? "selected" : ""}>
+        Подороже
+      </option>
+    </select>
+  </label>
+</form>
             `;
           }
 
+          const productsCount =
+  products.length;
 
+let activeFiltersHtml = "";
+
+for (const characteristic of catalogFilterData) {
+  const values =
+    selectedFilters[characteristic.id] || [];
+
+ for (const value of values) {
+  const removeParams =
+    new URLSearchParams(url.search);
+
+  removeParams.delete(
+    `filter_${characteristic.id}`
+  );
+
+  activeFiltersHtml += `
+    <span>
+      ${escapeHtml(characteristic.name)}: ${escapeHtml(value)}
+      <a href="/catalog?${removeParams.toString()}">×</a>
+    </span>
+  `;
+}}
           let productsHtml =
             "";
 
@@ -2191,9 +2317,78 @@ const server =
                   Каталог товаров
                 </h1>
 
+
+                <p>
+  Найдено товаров: ${productsCount}
+</p>
+
+${activeFiltersHtml
+  ? `
+    <p>
+      Активные фильтры: ${activeFiltersHtml}
+    </p>
+  `
+  : ""}
+
+                <form method="GET" action="/catalog">
+  <label>
+    Сортировка:
+
+    <select name="sort">
+      <option
+        value=""
+        ${sort === "" ? "selected" : ""}
+      >
+        По умолчанию
+      </option>
+
+      <option
+        value="price_asc"
+        ${sort === "price_asc" ? "selected" : ""}
+      >
+        Подешевле
+      </option>
+
+      <option
+        value="price_desc"
+        ${sort === "price_desc" ? "selected" : ""}
+      >
+        Подороже
+      </option>
+    </select>
+  </label>
+
+  ${Object.entries(selectedFilters)
+  .flatMap(([id, values]) =>
+    values.map(value =>
+      `<input type="hidden" name="filter_${id}" value="${escapeHtml(value)}">`
+    )
+  )
+  .join("")}
+
+  <button>
+    Применить
+  </button>
+</form>
+
+                <form method="GET" action="/catalog">
+  <input
+    type="text"
+    name="search"
+    value="${escapeHtml(searchQuery)}"
+    placeholder="Введите запрос для поиска"
+  >
+
+  <button>
+    Найти
+  </button>
+</form>
+
                 <p>
                   ${categoryLinks}
                 </p>
+
+                ${filtersHtml}
 
                 ${productsHtml}
               `
