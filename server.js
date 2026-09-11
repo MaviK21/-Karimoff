@@ -1870,27 +1870,22 @@ const server =
           );
         }
 
+      // ==================================================
+// КАТАЛОГ
+// ==================================================
 
-        // ==================================================
-        // КАТАЛОГ
-        // ==================================================
+if (
+  req.method === "GET" &&
+  path === "/catalog"
+) {
 
-        if (
-          req.method === "GET" &&
-          path === "/catalog"
-        ) {
+  const cats =
+    getCategories();
 
-          const cats =
-            getCategories();
+  const categoryFilter =
+    url.searchParams.get("category");
 
-          const categoryFilter =
-            url.searchParams.get(
-              "category"
-            );
-
-
-
-            const searchQuery =
+const searchQuery =
   url.searchParams.get("search")?.trim() || "";
 
   const sort =
@@ -1902,544 +1897,303 @@ const server =
 const priceMax =
   url.searchParams.get("price_max") || "";
 
-          const catalogFilterData =
-            categoryFilter
-              ? getCatalogFilterData(
-                  Number(categoryFilter)
-                )
-              : [];
+  let products;
 
-const selectedFilters = {};
+  if (categoryFilter) {
 
-for (const characteristic of catalogFilterData) {
-  const parameterName =
-    `filter_${characteristic.id}`;
+    products =
+      db.prepare(`
+        SELECT DISTINCT p.*
+        FROM products p
 
-  const values =
-    url.searchParams.getAll(parameterName);
+        LEFT JOIN product_categories pc
+          ON pc.product_id = p.id
 
-  if (values.length > 0) {
-    selectedFilters[characteristic.id] = values;
+        WHERE
+          p.category_id = ?
+          OR pc.category_id = ?
+
+        ORDER BY p.id DESC
+      `).all(
+        Number(categoryFilter),
+        Number(categoryFilter)
+      );
+
+  } else {
+
+    products =
+      db.prepare(`
+        SELECT *
+        FROM products
+        ORDER BY id DESC
+      `).all();
+
   }
-}
 
-          let products;
+    if (searchQuery) {
+    const query = searchQuery.toLowerCase();
 
-
-          if (categoryFilter) {
-
-            products =
-              db.prepare(`
-                SELECT DISTINCT p.*
-                FROM products p
-
-                LEFT JOIN product_categories pc
-                  ON pc.product_id = p.id
-
-                WHERE
-                  p.category_id = ?
-                  OR pc.category_id = ?
-
-                ORDER BY p.id DESC
-              `).all(
-                Number(categoryFilter),
-                Number(categoryFilter)
-              );
-
-          } else {
-
-            products =
-              db.prepare(`
-                SELECT *
-                FROM products
-                ORDER BY id DESC
-              `).all();
-
-          }
-
-          if (searchQuery) {
-  const query = searchQuery.toLowerCase();
-
-  products = products.filter(product => {
-    const name =
-      String(product.name || "").toLowerCase();
-
-    const sku =
-      String(product.sku || "").toLowerCase();
-
-    return (
-      name.includes(query) ||
-      sku.includes(query)
+    products = products.filter(product =>
+      product.name?.toLowerCase().includes(query) ||
+      product.sku?.toLowerCase().includes(query)
     );
-  });
-}
+  }
 
-if (priceMin) {
-  const min =
-    Number(priceMin);
+    if (sort === "price_asc") {
+    products.sort((a, b) => a.price - b.price);
+  }
 
-  products = products.filter(
-    product => product.price >= min
+  if (sort === "price_desc") {
+    products.sort((a, b) => b.price - a.price);
+  }
+
+  if (priceMin) {
+  products = products.filter(product =>
+    Number(product.price) >= Number(priceMin)
   );
 }
 
 if (priceMax) {
-  const max =
-    Number(priceMax);
-
-  products = products.filter(
-    product => product.price <= max
+  products = products.filter(product =>
+    Number(product.price) <= Number(priceMax)
   );
 }
 
-if (sort === "price_asc") {
-  products.sort(
-    (a, b) => a.price - b.price
-  );
-}
-
-if (sort === "price_desc") {
-  products.sort(
-    (a, b) => b.price - a.price
-  );
-}
-
-          const selectedCharacteristicIds =
-  Object.keys(selectedFilters).map(Number);
-
-if (selectedCharacteristicIds.length > 0) {
-  products = products.filter(product => {
-    const characteristics =
-      getProductCharacteristics(product.id);
-
-    return selectedCharacteristicIds.every(
-      characteristicId => {
-        const selectedValues =
-          selectedFilters[characteristicId];
-
-        return characteristics.some(
-          characteristic =>
-            characteristic.id === characteristicId &&
-            selectedValues.includes(
-              characteristic.value
-            )
-        );
-      }
-    );
-  });
-}
-
-          let categoryLinks = `
-            <a href="/catalog">
-              Все категории
-            </a>
-          `;
-
-
-          for (
-            const category
-            of cats
-          ) {
-
-            if (category.hidden) {
-              continue;
-            }
-
-            categoryLinks += `
-              |
-              <a
-                href="/catalog?category=${category.id}"
-              >
-                ${escapeHtml(
-                  category.name
-                )}
-              </a>
-            `;
-          }
-
-          let filtersHtml = "";
-
-          if (catalogFilterData.length > 0) {
-            let filterFieldsHtml = "";
-
-            for (const characteristic of catalogFilterData) {
-              const parameterName =
-                `filter_${characteristic.id}`;
-              const selectedValues =
-                url.searchParams.getAll(parameterName);
-
-              let valuesHtml = "";
-
-              for (const value of characteristic.values) {
-                valuesHtml += `
-                  <label>
-                    <input
-                      type="checkbox"
-                      name="${parameterName}"
-                      value="${escapeHtml(value)}"
-                      ${
-                        selectedValues.includes(value)
-                          ? "checked"
-                          : ""
-                      }
-                    >
-                    ${escapeHtml(value)}
-                  </label>
-                  <br>
-                `;
-              }
-
-              filterFieldsHtml += `
-                <fieldset style="display: inline-block;">
-                  <legend>
-                    ${escapeHtml(characteristic.name)}
-                  </legend>
-
-                  ${
-                    valuesHtml ||
-                    "<p>Доступных значений пока нет.</p>"
-                  }
-                </fieldset>
-              `;
-            }
-
-            filtersHtml = `
-              <form method="GET" action="/catalog">
-                <input
-                  type="hidden"
-                  name="category"
-                  value="${escapeHtml(categoryFilter)}"
-                >
-
-                               <input
-                 type="hidden"
-                 name="search"
-                 value="${escapeHtml(searchQuery)}"
-               >
-
-               <input
-                 type="hidden"
-                 name="sort"
-                 value="${escapeHtml(sort)}"
-               >
-
-               <input
-                 type="hidden"
-                 name="price_min"
-                 value="${escapeHtml(priceMin)}"
-               >
-
-               <input
-                 type="hidden"
-                 name="price_max"
-                 value="${escapeHtml(priceMax)}"
-               >
-
-                ${filterFieldsHtml}
-
-                <button>
-                  Применить фильтры
-                </button>
-              </form>
-            `;
-          }
-
-          const productsCount =
-  products.length;
-
-let activeFiltersHtml = "";
-
-for (const characteristic of catalogFilterData) {
-  const values =
-    selectedFilters[characteristic.id] || [];
-
- for (const value of values) {
-  const removeParams =
-    new URLSearchParams(url.search);
-
-  removeParams.delete(
-    `filter_${characteristic.id}`
-  );
-
-  activeFiltersHtml += `
-    <span>
-      ${escapeHtml(characteristic.name)}: ${escapeHtml(value)}
-      <a href="/catalog?${removeParams.toString()}">×</a>
-    </span>
+  let categoryLinks = `
+    <a href="/catalog">
+      Все категории
+    </a>
   `;
-}}
-          let productsHtml =
-            "";
 
+  for (
+    const category
+    of cats
+  ) {
 
-          if (
-            products.length === 0
-          ) {
+    if (category.hidden) {
+      continue;
+    }
 
-            productsHtml =
-              "<p>Товаров пока нет.</p>";
+    categoryLinks += `
+      |
+      <a href="/catalog?category=${category.id}">
+        ${escapeHtml(category.name)}
+      </a>
+    `;
+  }
 
-          } else {
+  let productsHtml = "";
 
-            productsHtml =
-              "<ul>";
+  if (products.length === 0) {
 
+    productsHtml =
+      "<p>Товаров пока нет.</p>";
 
-            for (
-              const product
-              of products
-            ) {
+  } else {
 
-              const discountPercent =
-                Number(product.discount_percent) || 0;
+    productsHtml = "<ul>";
 
-              const discountedPrice =
-                discountPercent > 0
-                  ? product.price * (1 - discountPercent / 100)
-                  : product.price;
+    for (
+      const product
+      of products
+    ) {
 
-              const names =
-                getProductCategoryNames(
-                  product.id
-                );
+      const discountPercent =
+        Number(product.discount_percent) || 0;
 
-              const characteristics =
-                getProductCharacteristics(
-                  product.id
-                );
+      const discountedPrice =
+        discountPercent > 0
+          ? product.price * (1 - discountPercent / 100)
+          : product.price;
 
-              let characteristicsHtml = "";
+      const names =
+        getProductCategoryNames(
+          product.id
+        );
 
-              for (
-                const characteristic
-                of characteristics
-              ) {
-                characteristicsHtml += `
-                  <p>
-                    <strong>
-                      ${escapeHtml(characteristic.name)}:
-                    </strong>
-                    ${escapeHtml(characteristic.value || "")}
-                  </p>
-                `;
-              }
+      productsHtml += `
+        <li>
 
-              productsHtml += `
-                <li>
+          <p>
+            <a href="/product/${product.id}">
+              <strong>
+                ${escapeHtml(product.name)}
+              </strong>
+            </a>
+          </p>
 
-                  <a
-                    href="/product/${product.id}"
-                  >
-                    ${escapeHtml(
-                      product.name
-                    )}
-                  </a>
-
-                  —
-                               ${
-                    product.price_on_request
-                      ? "Цена по запросу"
-                      : discountPercent > 0
-                        ? `<s>${product.price} ${product.currency}</s> → ${discountedPrice} ${product.currency} / ${product.unit} (−${discountPercent}%)`
-                        : `${product.price} ${product.currency} / ${product.unit}`
-                  }
-
-                   <br>
-
-                  Наличие:
-                  ${
-                    product.availability === "in_stock"
-                      ? "В наличии"
-                      : product.availability === "on_order"
-                        ? "Под заказ"
-                        : "Нет в наличии"
-                  }
-
-                  ${
-                    names.length
-                      ? `[${escapeHtml(
-                          names.join(", ")
-                        )}]`
-                      : ""
-                  }
-
-                  <br>
-
-                  ${escapeHtml(
-                    product.description ||
-                    ""
-                  )}
-
-                  ${characteristicsHtml}
-
-                  ${
-  product.image
-    ? `
-      <br>
-      <img
-        src="${escapeHtml(product.image)}"
-        alt="${escapeHtml(product.name)}"
-        style="max-width:200px; max-height:200px;"
-      >
-      <br>
-    `
-    : ""
-}
-
-                  <br>
-
-                  <a
-                    href="/cart/add/${product.id}"
-                  >
-                    В корзину
-                  </a>
-
-                  ${
-                    isAdmin(req)
-                      ? `
-                        |
-                        <a
-                          href="/edit-product/${product.id}"
-                        >
-                          Редактировать
-                        </a>
-
-                        |
-
-                        <a
-                          href="/delete-product/${product.id}"
-                          onclick="return confirm('Удалить товар?')"
-                        >
-                          Удалить
-                        </a>
-                      `
-                      : ""
-                  }
-
-                </li>
-              `;
+          <p>
+            ${
+              product.price_on_request
+                ? "Цена по запросу"
+                : discountPercent > 0
+                  ? `<s>${product.price} ${product.currency}</s>
+                     →
+                     ${discountedPrice} ${product.currency}`
+                  : `${product.price} ${product.currency}`
             }
+          </p>
 
+          <p>
+            Наличие:
+            ${
+              product.availability === "in_stock"
+                ? "В наличии"
+                : product.availability === "on_order"
+                  ? "Под заказ"
+                  : "Нет в наличии"
+            }
+          </p>
 
-            productsHtml +=
-              "</ul>";
+          ${
+            names.length
+              ? `
+                <p>
+                  Категории:
+                  ${escapeHtml(names.join(", "))}
+                </p>
+              `
+              : ""
           }
 
+          <p>
+            ${escapeHtml(product.description || "")}
+          </p>
 
-          return sendHtml(
-            res,
-            renderPage(
-              req,
-              "Каталог",
-              `
-                <h1>
-                  Каталог товаров
-                </h1>
-
-
+          ${
+            product.image
+              ? `
                 <p>
-  Найдено товаров: ${productsCount}
-</p>
+                  <img
+                    src="${escapeHtml(product.image)}"
+                    alt="${escapeHtml(product.name)}"
+                    style="max-width:200px; max-height:200px;"
+                  >
+                </p>
+              `
+              : ""
+          }
 
-${activeFiltersHtml
-  ? `
-    <p>
-      Активные фильтры: ${activeFiltersHtml}
-    </p>
-  `
-  : ""}
+          <p>
+            <a href="/cart/add/${product.id}">
+              В корзину
+            </a>
 
-                <form method="GET" action="/catalog">
+            ${
+              isAdmin(req)
+                ? `
+                  |
+                  <a href="/edit-product/${product.id}">
+                    Редактировать
+                  </a>
+
+                  |
+                  <a
+                    href="/delete-product/${product.id}"
+                    onclick="return confirm('Удалить товар?')"
+                  >
+                    Удалить
+                  </a>
+                `
+                : ""
+            }
+          </p>
+
+        </li>
+
+        <hr>
+      `;
+    }
+
+    productsHtml += "</ul>";
+  }
+
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      "Каталог",
+      `
+        <h1>
+          Каталог товаров
+        </h1>
+
+        <p>
+          Найдено товаров: ${products.length}
+        </p>
 
 <form method="GET" action="/catalog">
 
-  <input
-    type="hidden"
-    name="category"
-    value="${escapeHtml(categoryFilter || "")}"
-  >
-
-  <label>
-
-  <label>
-    Сортировка:
-
-    <select name="sort">
-      <option
-        value=""
-        ${sort === "" ? "selected" : ""}
-      >
-        По умолчанию
-      </option>
-
-      <option
-        value="price_asc"
-        ${sort === "price_asc" ? "selected" : ""}
-      >
-        Подешевле
-      </option>
-
-      <option
-        value="price_desc"
-        ${sort === "price_desc" ? "selected" : ""}
-      >
-        Подороже
-      </option>
-    </select>
-  </label>
-
-    <input
-    type="hidden"
-    name="search"
-    value="${escapeHtml(searchQuery)}"
-  >
-
-  <input
-    type="hidden"
-    name="price_min"
-    value="${escapeHtml(priceMin)}"
-  >
-
-  <input
-    type="hidden"
-    name="price_max"
-    value="${escapeHtml(priceMax)}"
-  >
-
-  ${Object.entries(selectedFilters)
-  .flatMap(([id, values]) =>
-    values.map(value =>
-      `<input type="hidden" name="filter_${id}" value="${escapeHtml(value)}">`
-    )
-  )
-  .join("")}
-
-  <button>
-    Применить
-  </button>
-</form>
-
-                <form method="GET" action="/catalog">
   <input
     type="text"
     name="search"
     value="${escapeHtml(searchQuery)}"
-    placeholder="Введите запрос для поиска"
+    placeholder="Поиск товара"
   >
 
-  <button>
+  <button type="submit">
     Найти
   </button>
+
 </form>
 
+<details>
+  <summary>Фильтры</summary>
 
-<form method="GET" action="/catalog">
+  <form method="GET" action="/catalog">
 
-  <input
-    type="hidden"
-    name="category"
-    value="${escapeHtml(categoryFilter || "")}"
-  >
+    <input
+      type="hidden"
+      name="search"
+      value="${escapeHtml(searchQuery)}"
+    >
+
+    <input
+      type="hidden"
+      name="category"
+      value="${escapeHtml(categoryFilter || "")}"
+    >
+
+    <input
+      type="hidden"
+      name="sort"
+      value="${escapeHtml(sort)}"
+    >
+
+    <p>
+      <label>
+        Цена от:
+        <input
+          type="number"
+          name="price_min"
+          value="${escapeHtml(priceMin)}"
+        >
+      </label>
+    </p>
+
+    <p>
+      <label>
+        Цена до:
+        <input
+          type="number"
+          name="price_max"
+          value="${escapeHtml(priceMax)}"
+        >
+      </label>
+    </p>
+
+    <button type="submit">
+      Применить
+    </button>
+
+  </form>
+</details>
+
+        <p>
+          ${categoryLinks}
+        </p>
+
+        <form method="GET" action="/catalog">
 
   <input
     type="hidden"
@@ -2449,236 +2203,38 @@ ${activeFiltersHtml
 
   <input
     type="hidden"
-    name="sort"
-    value="${escapeHtml(sort)}"
+    name="category"
+    value="${escapeHtml(categoryFilter || "")}"
   >
 
   <label>
-    Цена от:
-    <input
-      type="number"
-      name="price_min"
-      min="0"
-      step="0.01"
-      value="${escapeHtml(priceMin)}"
+    Сортировка:
+
+    <select
+      name="sort"
+      onchange="this.form.submit()"
     >
+      <option value="" ${sort === "" ? "selected" : ""}>
+        По умолчанию
+      </option>
+
+      <option value="price_asc" ${sort === "price_asc" ? "selected" : ""}>
+        Дешевле
+      </option>
+
+      <option value="price_desc" ${sort === "price_desc" ? "selected" : ""}>
+        Дороже
+      </option>
+    </select>
   </label>
 
-  <label>
-    Цена до:
-    <input
-      type="number"
-      name="price_max"
-      min="0"
-      step="0.01"
-      value="${escapeHtml(priceMax)}"
-    >
-  </label>
+</form>
 
-  ${Object.entries(selectedFilters)
-    .flatMap(([id, values]) =>
-      values.map(value =>
-        `<input type="hidden" name="filter_${id}" value="${escapeHtml(value)}">`
-      )
+        ${productsHtml}
+      `
     )
-    .join("")}
-
-  <button>
-    Применить цену
-  </button>
-
-</form> 
-
-                <p>
-                  ${categoryLinks}
-                </p>
-
-                ${filtersHtml}
-
-                ${productsHtml}
-              `
-            )
-          );
-        }
-
-
-        // ==================================================
-        // КАРТОЧКА ТОВАРА
-        // ==================================================
-
-        if (
-          req.method === "GET" &&
-          /^\/product\/\d+$/.test(path)
-        ) {
-
-          const id =
-            Number(
-              path.split("/")[2]
-            );
-
-          const product =
-            db.prepare(`
-              SELECT *
-              FROM products
-              WHERE id = ?
-            `).get(id);
-
-
-          if (!product) {
-
-            return sendHtml(
-              res,
-              renderPage(
-                req,
-                "Товар не найден",
-                `
-                  <h1>
-                    Товар не найден
-                  </h1>
-
-                  <p>
-                    <a href="/catalog">
-                      Вернуться в каталог
-                    </a>
-                  </p>
-                `
-              ),
-              404
-            );
-          }
-
-
-          const names =
-            getProductCategoryNames(
-              id
-            );
-
-          const characteristics =
-            getProductCharacteristics(
-              id
-            );
-
-            let characteristicsHtml = "";
-
-          for (
-            const characteristic
-            of characteristics
-          ) {
-            characteristicsHtml += `
-              <p>
-                <strong>
-                  ${escapeHtml(characteristic.name)}:
-                </strong>
-                ${escapeHtml(characteristic.value || "")}
-              </p>
-            `;
-          }
-
-          const discountPercent =
-  Number(product.discount_percent) || 0;
-
-const discountedPrice =
-  discountPercent > 0
-    ? product.price * (1 - discountPercent / 100)
-    : product.price;
-
-          return sendHtml(
-            res,
-            renderPage(
-              req,
-              product.name,
-              `
-                <h1>
-                  ${escapeHtml(
-                    product.name
-                  )}
-                </h1>
-
-                <p>
-                  <strong>
-
-                ${
-                  product.image
-                    ? `
-                      <p>
-                        <img
-                          src="${escapeHtml(product.image)}"
-                          alt="${escapeHtml(product.name)}"
-                          style="max-width: 600px; width: 100%; height: auto;"
-                        >
-                      </p>
-                    `
-                    : ""
-                }
-
-                <p>
-                  <strong>
-                ${
-  product.price_on_request
-    ? "Цена по запросу"
-    : discountPercent > 0
-      ? `<s>${product.price} ${product.currency}</s> → ${discountedPrice} ${product.currency} / ${product.unit} (−${discountPercent}%)`
-      : `${product.price} ${product.currency} / ${product.unit}`
+  );
 }
-                  </strong>
-                </p>
-
-                <br>
-
-                Наличие:
-                ${
-                  product.availability === "in_stock"
-                    ? "В наличии"
-                    : product.availability === "on_order"
-                      ? "Под заказ"
-                      : "Нет в наличии"
-                }
-
-                <p>
-                  ${escapeHtml(
-                    product.description ||
-                    ""
-                  )}
-                </p>
-
-                ${characteristicsHtml}
-
-                <p>
-                  Категории:
-                  ${
-                    escapeHtml(
-                      names.join(", ") ||
-                      "—"
-                    )
-                  }
-                </p>
-
-                <p>
-                  <a
-                    href="/cart/add/${id}"
-                  >
-                    В корзину
-                  </a>
-                </p>
-
-                ${
-                  isAdmin(req)
-                    ? `
-                      <p>
-                        <a
-                          href="/edit-product/${id}"
-                        >
-                          Редактировать товар
-                        </a>
-                      </p>
-                    `
-                    : ""
-                }
-              `
-            )
-          );
-        }
-
 
         // ==================================================
         // КОРЗИНА
