@@ -2111,6 +2111,30 @@ if (selectedCharacteristicIds.length > 0) {
                   value="${escapeHtml(categoryFilter)}"
                 >
 
+                               <input
+                 type="hidden"
+                 name="search"
+                 value="${escapeHtml(searchQuery)}"
+               >
+
+               <input
+                 type="hidden"
+                 name="sort"
+                 value="${escapeHtml(sort)}"
+               >
+
+               <input
+                 type="hidden"
+                 name="price_min"
+                 value="${escapeHtml(priceMin)}"
+               >
+
+               <input
+                 type="hidden"
+                 name="price_max"
+                 value="${escapeHtml(priceMax)}"
+               >
+
                 ${filterFieldsHtml}
 
                 <button>
@@ -2326,6 +2350,17 @@ ${activeFiltersHtml
   : ""}
 
                 <form method="GET" action="/catalog">
+
+<form method="GET" action="/catalog">
+
+  <input
+    type="hidden"
+    name="category"
+    value="${escapeHtml(categoryFilter || "")}"
+  >
+
+  <label>
+
   <label>
     Сортировка:
 
@@ -2353,6 +2388,24 @@ ${activeFiltersHtml
     </select>
   </label>
 
+    <input
+    type="hidden"
+    name="search"
+    value="${escapeHtml(searchQuery)}"
+  >
+
+  <input
+    type="hidden"
+    name="price_min"
+    value="${escapeHtml(priceMin)}"
+  >
+
+  <input
+    type="hidden"
+    name="price_max"
+    value="${escapeHtml(priceMax)}"
+  >
+
   ${Object.entries(selectedFilters)
   .flatMap(([id, values]) =>
     values.map(value =>
@@ -2378,6 +2431,63 @@ ${activeFiltersHtml
     Найти
   </button>
 </form>
+
+
+<form method="GET" action="/catalog">
+
+  <input
+    type="hidden"
+    name="category"
+    value="${escapeHtml(categoryFilter || "")}"
+  >
+
+  <input
+    type="hidden"
+    name="search"
+    value="${escapeHtml(searchQuery)}"
+  >
+
+  <input
+    type="hidden"
+    name="sort"
+    value="${escapeHtml(sort)}"
+  >
+
+  <label>
+    Цена от:
+    <input
+      type="number"
+      name="price_min"
+      min="0"
+      step="0.01"
+      value="${escapeHtml(priceMin)}"
+    >
+  </label>
+
+  <label>
+    Цена до:
+    <input
+      type="number"
+      name="price_max"
+      min="0"
+      step="0.01"
+      value="${escapeHtml(priceMax)}"
+    >
+  </label>
+
+  ${Object.entries(selectedFilters)
+    .flatMap(([id, values]) =>
+      values.map(value =>
+        `<input type="hidden" name="filter_${id}" value="${escapeHtml(value)}">`
+      )
+    )
+    .join("")}
+
+  <button>
+    Применить цену
+  </button>
+
+</form> 
 
                 <p>
                   ${categoryLinks}
