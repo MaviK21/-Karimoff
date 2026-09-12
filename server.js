@@ -1183,6 +1183,44 @@ const server =
   }
 }
 
+// ==================================================
+// ПОДСКАЗКИ ПОИСКА
+// ==================================================
+
+if (
+  req.method === "GET" &&
+  path === "/search-suggestions"
+) {
+  const query =
+    url.searchParams
+      .get("q")
+      ?.trim()
+      .toLowerCase() || "";
+
+  const suggestions =
+    query
+      ? db.prepare(`
+          SELECT id, name, sku
+          FROM products
+          WHERE
+            LOWER(name) LIKE ?
+            OR LOWER(sku) LIKE ?
+          ORDER BY name
+          LIMIT 8
+        `).all(
+          `%${query}%`,
+          `%${query}%`
+        )
+      : [];
+
+  res.writeHead(200, {
+    "Content-Type": "application/json; charset=utf-8"
+  });
+
+  return res.end(
+    JSON.stringify(suggestions)
+  );
+} 
 
         // ==================================================
         // ГЛАВНАЯ
@@ -2272,6 +2310,11 @@ if (selectedCharacteristicIds.length > 0) {
     value="${escapeHtml(searchQuery)}"
     placeholder="Поиск товара"
   >
+
+  <div
+  id="search-suggestions"
+  style="display:none;"
+></div>
 
     ${catalogStateHiddenHtml}
 
