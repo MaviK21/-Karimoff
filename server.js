@@ -1094,9 +1094,11 @@ function getCartItems(req) {
       ...product,
       quantity,
       sum:
-  product.price *
-  quantity *
-  (1 - (Number(product.discount_percent) || 0) / 100)
+  product.price_on_request
+    ? 0
+    : product.price *
+      quantity *
+      (1 - (Number(product.discount_percent) || 0) / 100)
     });
   }
 
@@ -2027,6 +2029,29 @@ const catalogStateHiddenHtml = `
     products.sort((a, b) => b.price - a.price);
   }
 
+  if (sort === "popular") {
+  const sales = db.prepare(`
+    SELECT
+      product_id,
+      SUM(quantity) AS total_quantity
+    FROM order_items
+    GROUP BY product_id
+  `).all();
+
+  const salesMap = new Map(
+    sales.map(item => [
+      item.product_id,
+      Number(item.total_quantity)
+    ])
+  );
+
+  products.sort(
+    (a, b) =>
+      (salesMap.get(b.id) || 0) -
+      (salesMap.get(a.id) || 0)
+  );
+}
+
   if (priceMin) {
   products = products.filter(product =>
     Number(product.price) >= Number(priceMin)
@@ -2431,6 +2456,11 @@ if (selectedCharacteristicIds.length > 0) {
       <option value="price_desc" ${sort === "price_desc" ? "selected" : ""}>
         Дороже
       </option>
+
+      <option value="popular" ${sort === "popular" ? "selected" : ""}>
+  Популярные
+</option>
+
     </select>
   </label>
 
@@ -2557,7 +2587,7 @@ if (
         </p>
 
         <p>
-          <a href="/cart/add/${id}">
+          <a href="//add/${id}">
             В корзину
           </a>
         </p>
@@ -2639,10 +2669,12 @@ if (
                 )}
 
                 —
-                ${
-  Number(item.discount_percent) > 0
-    ? `<s>${item.price} ${item.currency}</s> → ${item.price * (1 - item.discount_percent / 100)} ${item.currency}`
-    : `${item.price} ${item.currency}`
+            ${
+  item.price_on_request
+    ? "Цена по запросу"
+    : Number(item.discount_percent) > 0
+      ? `<s>${item.price} ${item.currency}</s> → ${item.price * (1 - item.discount_percent / 100)} ${item.currency}`
+      : `${item.price} ${item.currency}`
 }
 
                 ×
@@ -2725,10 +2757,10 @@ if (
 
           const product =
             db.prepare(`
-              SELECT id
+              SELECT id, currency
               FROM products
               WHERE id = ?
-            `).get(id);
+              `).get(id);
 
 
           if (!product) {
@@ -2748,6 +2780,45 @@ if (
             );
           }
 
+                const cart =
+        getCartItems(req);
+
+      if (
+        cart.length > 0 &&
+        cart.some(item =>
+          item.currency !== product.currency
+        )
+      ) {
+        return sendHtml(
+          res,
+          renderPage(
+            req,
+            "Нельзя добавить товар",
+            `
+              <h1>
+                Нельзя добавить товар
+              </h1>
+
+              <p>
+                В корзине уже есть товары
+                в другой валюте.
+              </p>
+
+              <p>
+                Очистите корзину или выберите
+                товар в той же валюте.
+              </p>
+
+              <p>
+                <a href="/cart">
+                  Вернуться в корзину
+                </a>
+              </p>
+            `
+          ),
+          400
+        );
+      }
 
           const currentCart =
             getCart(req);
@@ -2856,6 +2927,8 @@ if (
             );
           }
 
+          const currency =
+  items[0].currency || "BYN";
 
           const total =
             items.reduce(
@@ -2864,6 +2937,8 @@ if (
               0
             );
 
+            const hasPriceOnRequest =
+  items.some(item => item.price_on_request);
 
           return sendHtml(
             res,
@@ -2877,15 +2952,19 @@ if (
 
                 <p>
                   Сумма заказа:
-                  <strong>
-                    ${total}
-                    руб.
-                  </strong>
+                    <strong>
+                      ${
+                        hasPriceOnRequest
+                        ? "Уточняется менеджером"
+                        : `${total} ${currency}`
+                      }
+                    </strong>
                 </p>
 
                 <form
                   method="POST"
                   action="/checkout"
+                   novalidate
                 >
 
                   <p>
@@ -2894,22 +2973,45 @@ if (
                       name="name"
                       required
                     >
-                  </p>
+
+                    <small
+                    id="name-error"
+                    style="display:none; color:red;"
+                  >
+                    Укажите имя
+                  </small>
+                </p>
 
                   <p>
                     Телефон:
                     <input
+                      type="tel"
                       name="phone"
+                      inputmode="tel"
+                      pattern=".{7,}"
                       required
                     >
+
+                    <small
+                      id="phone-error"
+                      style="display:none; color:red;"
+                    >
+                      Номер телефона указан некорректно
+                    </small>
                   </p>
 
                   <p>
                     Адрес:
                     <input
                       name="address"
-                      required
                     >
+
+                    <small
+                      id="address-error"
+                      style="display:none; color:red;"
+                    >
+                      Укажите адрес
+                    </small>
                   </p>
 
                   <p>
@@ -2918,6 +3020,13 @@ if (
                       type="email"
                       name="email"
                     >
+
+                    <small
+  id="email-error"
+  style="display:none; color:red;"
+>
+  Введите корректный адрес электронной почты
+</small>
                   </p>
 
                   <p>
@@ -2976,6 +3085,13 @@ if (
                         required
                       >
 
+                      <small
+  id="agree-error"
+  style="display:none; color:red;"
+>
+  Необходимо согласиться на обработку персональных данных
+</small>
+
                       Согласен
                       на обработку
                       персональных данных
@@ -2986,6 +3102,140 @@ if (
                   <button>
                     Отправить заявку
                   </button>
+
+                  <script>
+  const checkoutForm =
+    document.querySelector('form[action="/checkout"]');
+
+  const nameInput =
+    checkoutForm.querySelector('input[name="name"]');
+
+  const phoneInput =
+    checkoutForm.querySelector('input[name="phone"]');
+
+  const addressInput =
+    checkoutForm.querySelector('input[name="address"]');
+
+    const deliveryInput =
+  checkoutForm.querySelector('select[name="delivery"]');
+
+  const nameError =
+    checkoutForm.querySelector('#name-error');
+
+  const phoneError =
+    checkoutForm.querySelector('#phone-error');
+
+  const addressError =
+    checkoutForm.querySelector('#address-error');
+
+    const agreeInput =
+checkoutForm.querySelector('input[name="agree"]');
+
+const agreeError =
+checkoutForm.querySelector('#agree-error');
+
+const emailInput =
+checkoutForm.querySelector('input[name="email"]');
+
+const emailError =
+checkoutForm.querySelector('#email-error');
+
+     function isValidPhone(phone) {
+  const digits = phone.replace(/[^0-9]/g, "");
+
+  if (digits.length === 11) {
+    if (
+      digits.startsWith("7") ||
+      digits.startsWith("8")
+    ) {
+      return true;
+    }
+  }
+
+  if (
+    digits.length === 12 &&
+    digits.startsWith("375")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+  checkoutForm.addEventListener("submit", (event) => {
+
+    let valid = true;
+
+    nameError.style.display = "none";
+    phoneError.style.display = "none";
+    addressError.style.display = "none";
+    agreeError.style.display = "none";
+
+if (!agreeInput.checked) {
+  agreeError.style.display = "block";
+  valid = false;
+}
+
+const email = emailInput.value.trim();
+
+if (
+  email &&
+!emailInput.checkValidity()
+) {
+  emailError.style.display = "block";
+  valid = false;
+}
+
+    if (!nameInput.value.trim()) {
+      nameError.style.display = "block";
+      valid = false;
+    }
+
+    const phone =
+  phoneInput.value.trim();
+
+if (!isValidPhone(phone)) {
+
+      phoneError.style.display = "block";
+      valid = false;
+    }
+
+    if (
+  deliveryInput.value === "delivery" &&
+  !addressInput.value.trim()
+) {
+  addressError.style.display = "block";
+  valid = false;
+}
+
+    if (!valid) {
+      event.preventDefault();
+    }
+  });
+
+  nameInput.addEventListener("input", () => {
+    if (nameInput.value.trim()) {
+      nameError.style.display = "none";
+    }
+  });
+
+  phoneInput.addEventListener("input", () => {
+
+    const phone =
+  phoneInput.value.trim();
+
+if (isValidPhone(phone)) {
+
+      phoneError.style.display = "none";
+    }
+  });
+
+  addressInput.addEventListener("input", () => {
+    if (addressInput.value.trim()) {
+      addressError.style.display = "none";
+    }
+  });
+</script>
 
                 </form>
               `
@@ -3053,6 +3303,8 @@ if (
             );
           }
 
+          const currency =
+  items[0].currency || "BYN";
 
           const name =
             params.get("name")
@@ -3066,12 +3318,14 @@ if (
             params.get("address")
               ?.trim() || "";
 
-
-          if (
-            !name ||
-            !phone ||
-            !address
-          ) {
+         if (
+  !name ||
+  !phone ||
+  (
+    params.get("delivery") === "delivery" &&
+    !address
+  )
+) {
 
             return sendHtml(
               res,
@@ -3106,15 +3360,17 @@ if (
                 phone,
                 address,
                 total,
+                currency,
                 created_at,
                 status
               )
-              VALUES (?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
             `).run(
               name,
               phone,
               address,
               total,
+              currency,
               new Date().toISOString(),
               "Новый"
             );
@@ -3135,9 +3391,10 @@ if (
                 product_name,
                 price,
                 quantity,
-                sum
+                sum,
+                price_on_request
               )
-              VALUES (?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
             `);
 
 
@@ -3152,7 +3409,8 @@ if (
               item.name,
               item.price,
               item.quantity,
-              item.sum
+              item.sum,
+              item.price_on_request ? 1 : 0
             );
           }
 
@@ -3184,7 +3442,7 @@ if (
                   Сумма:
                   <strong>
                     ${total}
-                    руб.
+                    ${currency}
                   </strong>
                 </p>
 
@@ -3220,9 +3478,16 @@ if (
 
           const orders =
             db.prepare(`
-              SELECT *
-              FROM orders
-              ORDER BY id DESC
+              SELECT
+  orders.*,
+  EXISTS (
+    SELECT 1
+    FROM order_items
+    WHERE order_items.order_id = orders.id
+      AND order_items.price_on_request = 1
+  ) AS has_price_on_request
+FROM orders
+ORDER BY id DESC
             `).all();
 
 
@@ -3261,8 +3526,8 @@ if (
                   )}
 
                   —
-                  ${order.total}
-                  руб.
+                 ${order.has_price_on_request ? "Уточняется менеджером" : order.total}
+                  ${order.has_price_on_request ? "" : order.currency}
 
                   —
                   ${escapeHtml(
@@ -3392,17 +3657,15 @@ if (
                 ${item.quantity}
 
                 —
-                ${item.sum}
-                руб.
+               ${item.price_on_request ? "Цена по запросу" : item.sum}
+                ${item.price_on_request ? "" : currency}
 
               </li>
             `;
           }
 
-
           itemsHtml +=
             "</ul>";
-
 
           return sendHtml(
             res,
@@ -3451,8 +3714,11 @@ if (
                 <p>
                   <strong>
                     Итого:
-                    ${order.total}
-                    руб.
+${
+  items.some(item => item.price_on_request)
+    ? "Уточняется менеджером"
+    : `${order.total} ${order.currency}`
+}
                   </strong>
                 </p>
 
@@ -3465,7 +3731,6 @@ if (
             )
           );
         }
-
 
         // ==================================================
         // УДАЛЕНИЕ ЗАКАЗА — ТОЛЬКО АДМИН
