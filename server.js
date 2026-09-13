@@ -56,6 +56,40 @@ function parseCookies(req) {
       continue;
     }
 
+    function normalizeSearchText(value = "") {
+  return String(value)
+    .toLowerCase()
+    .replaceAll("ё", "е")
+    .trim();
+}
+
+function searchDistance(a, b) {
+  const matrix = [];
+
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      matrix[i][j] =
+        b[i - 1] === a[j - 1]
+          ? matrix[i - 1][j - 1]
+          : Math.min(
+              matrix[i - 1][j] + 1,
+              matrix[i][j - 1] + 1,
+              matrix[i - 1][j - 1] + 1
+            );
+    }
+  }
+
+  return matrix[b.length][a.length];
+}
+
     cookies[name] = decodeURIComponent(
       pieces.join("=") || ""
     );
@@ -1192,35 +1226,32 @@ if (
   path === "/search-suggestions"
 ) {
   const query =
-    url.searchParams
-      .get("q")
-      ?.trim()
-      .toLowerCase() || "";
+  url.searchParams
+    .get("q")
+    ?.trim()
+    .toLowerCase() || "";
 
   const suggestions =
     query
       ? db.prepare(`
           SELECT id, name, sku
           FROM products
-          WHERE
-            LOWER(name) LIKE ?
-            OR LOWER(sku) LIKE ?
           ORDER BY name
-          LIMIT 8
-        `).all(
-          `%${query}%`,
-          `%${query}%`
-        )
+        `).all().filter(product =>
+          product.name?.toLowerCase().includes(query) ||
+          product.sku?.toLowerCase().includes(query)
+        ).slice(0, 8)
       : [];
 
   res.writeHead(200, {
-    "Content-Type": "application/json; charset=utf-8"
+    "Content-Type":
+      "application/json; charset=utf-8"
   });
 
   return res.end(
     JSON.stringify(suggestions)
   );
-} 
+}
 
         // ==================================================
         // ГЛАВНАЯ
@@ -2042,39 +2073,62 @@ const catalogStateHiddenHtml = `
 
   }
 
-    const availableBrands = [
-    ...new Set(
-      products
-        .map(product => product.brand)
-        .filter(Boolean)
-    )
-  ];
+      const availableBrands = [
+      ...new Set(
+        products
+          .map(product => product.brand)
+          .filter(Boolean)
+      )
+    ];
 
-    if (searchQuery) {
-    const query = searchQuery.toLowerCase();
+     if (searchQuery) {
+  const query = searchQuery.toLowerCase();
 
-    products = products.filter(product =>
-      product.name?.toLowerCase().includes(query) ||
-      product.sku?.toLowerCase().includes(query)
-    );
-  }
+  products = products.filter(product => {
+    const name =
+      product.name?.toLowerCase() || "";
 
-    if (sort === "price_asc") {
-    products.sort((a, b) => a.price - b.price);
-  }
+    const sku =
+      product.sku?.toLowerCase() || "";
 
-  if (sort === "price_desc") {
-    products.sort((a, b) => b.price - a.price);
-  }
+    if (
+      name.includes(query) ||
+      sku.includes(query)
+    ) {
+      return true;
+    }
 
-  if (sort === "popular") {
-  const sales = db.prepare(`
-    SELECT
-      product_id,
-      SUM(quantity) AS total_quantity
-    FROM order_items
-    GROUP BY product_id
-  `).all();
+    const words = name.split(/\s+/);
+
+    return words.some(word => {
+      if (word.length < 4 || query.length < 4) {
+        return false;
+      }
+
+      const distance =
+        searchDistance(query, word);
+
+      return distance <= 1;
+    });
+  });
+}
+
+      if (sort === "price_asc") {
+      products.sort((a, b) => a.price - b.price);
+    }
+
+    if (sort === "price_desc") {
+      products.sort((a, b) => b.price - a.price);
+    }
+
+    if (sort === "popular") {
+    const sales = db.prepare(`
+      SELECT
+        product_id,
+        SUM(quantity) AS total_quantity
+      FROM order_items
+      GROUP BY product_id
+    `).all();
 
   const salesMap = new Map(
     sales.map(item => [
@@ -2304,6 +2358,8 @@ if (selectedCharacteristicIds.length > 0) {
 
 <form method="GET" action="/catalog">
 
+<div style="position:relative;">
+
   <input
     type="text"
     name="search"
@@ -2313,8 +2369,18 @@ if (selectedCharacteristicIds.length > 0) {
 
   <div
   id="search-suggestions"
-  style="display:none;"
+  style="
+    display:none;
+    position:absolute;
+    z-index:1000;
+    background:white;
+    border:1px solid #ccc;
+    width:100%;
+    box-sizing:border-box;
+  "
 ></div>
+
+</div>
 
     ${catalogStateHiddenHtml}
 
@@ -2510,6 +2576,76 @@ if (selectedCharacteristicIds.length > 0) {
 </form>
 
         ${productsHtml}
+
+<script>
+  const searchInput =
+    document.querySelector('input[name="search"]');
+
+  const searchSuggestions =
+    document.getElementById("search-suggestions");
+
+searchInput.addEventListener("input", async () => {
+  const query =
+    searchInput.value.trim();
+
+  if (!query) {
+    searchSuggestions.innerHTML = "";
+    searchSuggestions.style.display = "none";
+    return;
+  }
+
+  const response =
+    await fetch(
+      "/search-suggestions?q=" +
+      encodeURIComponent(query)
+    );
+
+    if (!response.ok) {
+  console.error(
+    "Ошибка подсказок:",
+    response.status
+  );
+  return;
+}
+
+  const suggestions =
+    await response.json();
+
+  if (suggestions.length === 0) {
+    searchSuggestions.innerHTML = "";
+    searchSuggestions.style.display = "none";
+    return;
+  }
+
+ searchSuggestions.innerHTML =
+  suggestions.map(product =>
+    '<div class="search-suggestion" data-value="' +
+    product.name.replace(/"/g, "&quot;") +
+    '">' +
+    product.name +
+    '</div>'
+  ).join("");
+
+  searchSuggestions.style.display = "block";
+});
+
+searchSuggestions.addEventListener("click", (event) => {
+  const suggestion =
+    event.target.closest(".search-suggestion");
+
+  if (!suggestion) {
+    return;
+  }
+
+  searchInput.value =
+    suggestion.dataset.value;
+
+  searchSuggestions.innerHTML = "";
+  searchSuggestions.style.display = "none";
+});
+
+    </script>
+
       `
     )
   );
