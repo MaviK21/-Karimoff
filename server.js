@@ -56,7 +56,15 @@ function parseCookies(req) {
       continue;
     }
 
-    function normalizeSearchText(value = "") {
+    cookies[name] = decodeURIComponent(
+      pieces.join("=") || ""
+    );
+  }
+
+  return cookies;
+}
+
+function normalizeSearchText(value = "") {
   return String(value)
     .toLowerCase()
     .replaceAll("ё", "е")
@@ -89,15 +97,6 @@ function searchDistance(a, b) {
 
   return matrix[b.length][a.length];
 }
-
-    cookies[name] = decodeURIComponent(
-      pieces.join("=") || ""
-    );
-  }
-
-  return cookies;
-}
-
 
 function isAdmin(req) {
   const cookies = parseCookies(req);
@@ -507,6 +506,33 @@ function getCategories() {
     .all();
 }
 
+function getCategoryProductCounts() {
+  const rows = db.prepare(`
+    SELECT
+      c.id,
+      COUNT(DISTINCT p.id) AS product_count
+    FROM categories c
+
+    LEFT JOIN products p
+      ON p.category_id = c.id
+      OR EXISTS (
+        SELECT 1
+        FROM product_categories pc
+        WHERE
+          pc.product_id = p.id
+          AND pc.category_id = c.id
+      )
+
+    GROUP BY c.id
+  `).all();
+
+  return new Map(
+    rows.map(row => [
+      row.id,
+      Number(row.product_count)
+    ])
+  );
+}
 
 function getCategoryLevel(
   categoryId,
@@ -1232,16 +1258,47 @@ if (
     .toLowerCase() || "";
 
   const suggestions =
-    query
-      ? db.prepare(`
-          SELECT id, name, sku
-          FROM products
-          ORDER BY name
-        `).all().filter(product =>
-          product.name?.toLowerCase().includes(query) ||
-          product.sku?.toLowerCase().includes(query)
-        ).slice(0, 8)
-      : [];
+  query
+    ? db.prepare(`
+        SELECT id, name, sku
+        FROM products
+        ORDER BY name
+      `).all().filter(product => {
+        const name =
+          normalizeSearchText(product.name || "");
+
+        const sku =
+          normalizeSearchText(product.sku || "");
+
+        if (
+          name.includes(query) ||
+          sku.includes(query)
+        ) {
+          return true;
+        }
+
+        const words = `${name} ${sku}`
+          .split(/\s+/)
+          .filter(Boolean);
+
+        return words.some(word => {
+          if (
+            word.length < 4 ||
+            query.length < 4
+          ) {
+            return false;
+          }
+
+          const maxDistance =
+            query.length >= 7 ? 2 : 1;
+
+          return (
+            searchDistance(word, query) <=
+            maxDistance
+          );
+        });
+      }).slice(0, 8)
+    : [];
 
   res.writeHead(200, {
     "Content-Type":
@@ -1950,6 +2007,9 @@ if (
   path === "/catalog"
 ) {
 
+  const categoryProductCounts =
+  getCategoryProductCounts();
+
   const cats =
     getCategories();
 
@@ -2082,35 +2142,34 @@ const catalogStateHiddenHtml = `
     ];
 
      if (searchQuery) {
-  const query = searchQuery.toLowerCase();
+  const query = normalizeSearchText(searchQuery);
 
-  products = products.filter(product => {
-    const name =
-      product.name?.toLowerCase() || "";
+products = products.filter(product => {
+  const name = normalizeSearchText(product.name || "");
+  const sku = normalizeSearchText(product.sku || "");
 
-    const sku =
-      product.sku?.toLowerCase() || "";
+  if (
+    name.includes(query) ||
+    sku.includes(query)
+  ) {
+    return true;
+  }
 
-    if (
-      name.includes(query) ||
-      sku.includes(query)
-    ) {
-      return true;
+  const words = `${name} ${sku}`
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return words.some(word => {
+    if (word.length < 4 || query.length < 4) {
+      return false;
     }
 
-    const words = name.split(/\s+/);
+    const maxDistance =
+      query.length >= 7 ? 2 : 1;
 
-    return words.some(word => {
-      if (word.length < 4 || query.length < 4) {
-        return false;
-      }
-
-      const distance =
-        searchDistance(query, word);
-
-      return distance <= 1;
-    });
+    return searchDistance(word, query) <= maxDistance;
   });
+});
 }
 
       if (sort === "price_asc") {
@@ -2208,10 +2267,17 @@ if (selectedCharacteristicIds.length > 0) {
       continue;
     }
 
+    if (
+  (categoryProductCounts.get(category.id) || 0) === 0
+) {
+  continue;
+}
+
     categoryLinks += `
       |
       <a href="/catalog?category=${category.id}">
         ${escapeHtml(category.name)}
+(${categoryProductCounts.get(category.id) || 0})
       </a>
     `;
   }
@@ -2382,7 +2448,10 @@ if (selectedCharacteristicIds.length > 0) {
 
 </div>
 
-    ${catalogStateHiddenHtml}
+${catalogStateHiddenHtml.replace(
+  /<input\s+type="hidden"\s+name="search"\s+value="[^"]*"\s*>\s*/i,
+  ""
+)}
 
   <button type="submit">
     Найти
@@ -2405,12 +2474,6 @@ if (selectedCharacteristicIds.length > 0) {
       type="hidden"
       name="category"
       value="${escapeHtml(categoryFilter || "")}"
-    >
-
-    <input
-      type="hidden"
-      name="sort"
-      value="${escapeHtml(sort)}"
     >
 
     <p>
@@ -2527,6 +2590,28 @@ if (selectedCharacteristicIds.length > 0) {
       `).join("")
     }
 
+    <fieldset>
+  <legend>Сортировка</legend>
+
+  <select name="sort">
+    <option value="" ${sort === "" ? "selected" : ""}>
+      По умолчанию
+    </option>
+
+    <option value="price_asc" ${sort === "price_asc" ? "selected" : ""}>
+      Дешевле
+    </option>
+
+    <option value="price_desc" ${sort === "price_desc" ? "selected" : ""}>
+      Дороже
+    </option>
+
+    <option value="popular" ${sort === "popular" ? "selected" : ""}>
+      Популярные
+    </option>
+  </select>
+</fieldset>
+
     <button type="submit">
       Применить
     </button>
@@ -2542,38 +2627,6 @@ if (selectedCharacteristicIds.length > 0) {
         <p>
           ${categoryLinks}
         </p>
-
-        <form method="GET" action="/catalog">
-
-  ${catalogStateHiddenHtml}
-
-  <label>
-    Сортировка:
-
-    <select
-      name="sort"
-      onchange="this.form.submit()"
-    >
-      <option value="" ${sort === "" ? "selected" : ""}>
-        По умолчанию
-      </option>
-
-      <option value="price_asc" ${sort === "price_asc" ? "selected" : ""}>
-        Дешевле
-      </option>
-
-      <option value="price_desc" ${sort === "price_desc" ? "selected" : ""}>
-        Дороже
-      </option>
-
-      <option value="popular" ${sort === "popular" ? "selected" : ""}>
-  Популярные
-</option>
-
-    </select>
-  </label>
-
-</form>
 
         ${productsHtml}
 
