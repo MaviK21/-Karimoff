@@ -4159,11 +4159,12 @@ ${
 
                     <br>
 
-                    <input
-                      type="text"
-                      name="brand"
-                      placeholder="Например: DEWALT"
-                    >
+                    <select name="brand_id">
+  <option value="">Без бренда</option>
+  ${db.prepare("SELECT id, name FROM brands ORDER BY name").all().map(brand => `
+    <option value="${brand.id}">${escapeHtml(brand.name)}</option>
+  `).join("")}
+</select>
                   </p>
 
                                     <p>
@@ -4287,9 +4288,7 @@ const image =
             params.get("sku")
               ?.trim() || "";
 
-          const brand =
-            params.get("brand")
-              ?.trim() || "";
+          const brandId = Number(params.get("brand_id")) || null;
 
               const currency =
           params.get("currency") || "BYN";
@@ -4358,7 +4357,7 @@ const image =
               category_id,
               image,
               sku,
-              brand,
+              brand_id,
               currency,
               availability,
               price_on_request,
@@ -4375,7 +4374,7 @@ const image =
             null,
             image,
             sku,
-            brand,
+            brandId,
             currency,
             availability,
             priceOnRequest,
@@ -4793,11 +4792,15 @@ const image =
 
                    <br>
 
-                   <input
-                     type="text"
-                     name="brand"
-                     value="${escapeHtml(product.brand || "")}"
-                   >
+                   <select name="brand_id">
+  <option value="">Без бренда</option>
+  ${db.prepare("SELECT id, name FROM brands ORDER BY name").all().map(brand => `
+    <option value="${brand.id}" ${product.brand_id === brand.id ? "selected" : ""}>
+      ${escapeHtml(brand.name)}
+    </option>
+  `).join("")}
+
+</select>
                  </p>
 
                   <p>
@@ -4965,10 +4968,9 @@ if (
   const name = params.get("name")?.trim() || "";
   const price = Number(params.get("price"));
   const description = params.get("description")?.trim() || "";
-  const sku = params.get("sku")?.trim() || "";
-  const brand = params.get("brand")?.trim() || "";
-  const currency =
-  params.get("currency") || "BYN";
+  const sku = params.get("sku")?.trim() || "";  
+const brandId = Number(params.get("brand_id")) || null;
+  const currency = params.get("currency") || "BYN";
 
 const availability =
   params.get("availability") || "in_stock";
@@ -5011,7 +5013,7 @@ const availability =
       price = ?,
       description = ?,
       sku = ?,
-      brand = ?,
+      brand_id = ?,
       category_id = ?,
       image = ?,
       currency = ?,
@@ -5026,7 +5028,7 @@ const availability =
     price,
     description,
     sku,
-    brand,
+    brandId,
     categoryIds[0] || null,
     image,
     currency,
