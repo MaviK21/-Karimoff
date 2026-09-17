@@ -263,12 +263,6 @@ function readRawBody(req) {
 }
 
 function parseMultipartBody(buffer, contentType) {
-console.log("CONTENT TYPE:", contentType);
-console.log("BODY SIZE:", buffer.length);
-console.log(
-  "BODY START:",
-  buffer.toString("latin1").slice(0, 500)
-);
 
   const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
 
@@ -354,7 +348,6 @@ if (!fields.has(name)) {
 
 fields.get(name).push(value);
   }
-  console.log("FIELDS FOUND:", [...fields.keys()]);
 
   return {
     get(name) {
@@ -373,7 +366,6 @@ getAll(name) {
 }
 
 function saveUploadedImage(file) {
-  console.log("UPLOAD FILE:", file);
 
   if (!file || !file.filename || !file.data.length) {
     return "";
@@ -432,61 +424,6 @@ function saveUploadedImage(file) {
   );
 
   return `/uploads/${filename}`;
-}
-
-async function saveUploadedFile(
-  fileName,
-  buffer
-) {
-  const safeName =
-    pathModule.basename(fileName);
-
-  if (!safeName) {
-    throw new Error(
-      "Некорректное имя файла"
-    );
-  }
-
-  const extension =
-  pathModule.extname(
-    safeName
-  ).toLowerCase();
-
-  const allowedExtensions = [
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".webp",
-    ".gif"
-  ];
-
-  if (
-    !allowedExtensions.includes(
-      extension
-    )
-  ) {
-    throw new Error(
-      "Недопустимый формат изображения"
-    );
-  }
-
-  const uniqueName =
-    `${Date.now()}-${randomBytes(
-      8
-    ).toString("hex")}${extension}`;
-
-  const filePath =
-    pathModule.join(
-      UPLOADS_DIR,
-      uniqueName
-    );
-
-  await fs.writeFile(
-    filePath,
-    buffer
-  );
-
-  return `/uploads/${uniqueName}`;
 }
 
 // ======================================================
@@ -1262,6 +1199,7 @@ if (
     ? db.prepare(`
         SELECT id, name, sku
         FROM products
+        WHERE deleted = 0Ы
         ORDER BY name
       `).all().filter(product => {
         const name =
@@ -1440,9 +1378,21 @@ if (
                     </a>
                   </li>
 
+<li>
+  <a href="/admin/brands">
+    Управление брендами
+  </a>
+</li>
+
                   <li>
                     <a href="/admin/categories">
                       Управление категориями
+                    </a>
+                  </li>
+
+                  <li>
+                    <a href="/admin/deleted-products">
+                      Удалённые товары
                     </a>
                   </li>
 
@@ -2113,8 +2063,11 @@ const catalogStateHiddenHtml = `
           ON pc.product_id = p.id
 
         WHERE
-          p.category_id = ?
-          OR pc.category_id = ?
+          p.deleted = 0
+          AND (
+            p.category_id = ?
+            OR pc.category_id = ?
+          )
 
         ORDER BY p.id DESC
       `).all(
@@ -2128,18 +2081,18 @@ const catalogStateHiddenHtml = `
       db.prepare(`
         SELECT *
         FROM products
+        WHERE deleted = 0
         ORDER BY id DESC
       `).all();
 
   }
 
-      const availableBrands = [
-      ...new Set(
-        products
-          .map(product => product.brand)
-          .filter(Boolean)
-      )
-    ];
+      const availableBrands =
+  db.prepare(`
+    SELECT id, name
+    FROM brands
+    ORDER BY name
+  `).all();
 
      if (searchQuery) {
   const query = normalizeSearchText(searchQuery);
@@ -2223,7 +2176,7 @@ if (selectedAvailability.length > 0) {
 
 if (selectedBrands.length > 0) {
   products = products.filter(product =>
-    selectedBrands.includes(product.brand)
+  selectedBrands.includes(String(product.brand_id))
   );
 }
 
@@ -2323,6 +2276,18 @@ if (selectedCharacteristicIds.length > 0) {
           </p>
 
           <p>
+  Бренд: ${
+    product.brand_id
+      ? db.prepare(`
+          SELECT name
+          FROM brands
+          WHERE id = ?
+        `).get(product.brand_id)?.name || "—"
+      : "—"
+  }
+</p>
+
+          <p>
             ${
               product.price_on_request
                 ? "Цена по запросу"
@@ -2386,6 +2351,16 @@ if (selectedCharacteristicIds.length > 0) {
                   <a href="/edit-product/${product.id}">
                     Редактировать
                   </a>
+
+                  <form
+                    method="POST"
+                    action="/admin/deleted-products/restore/${product.id}"
+                    style="display:inline"
+                  >
+                    <button type="submit">
+                      Восстановить
+                    </button>
+                  </form>
 
                   |
                   <a
@@ -2542,17 +2517,17 @@ ${catalogStateHiddenHtml.replace(
   ${
     availableBrands.length
       ? availableBrands.map(brand => `
-          <label>
-            <input
-              type="checkbox"
-              name="brand"
-              value="${escapeHtml(brand)}"
-              ${selectedBrands.includes(brand) ? "checked" : ""}
-            >
-            ${escapeHtml(brand)}
-          </label>
-          <br>
-        `).join("")
+  <label>
+    <input
+      type="checkbox"
+      name="brand"
+      value="${brand.id}"
+      ${selectedBrands.includes(String(brand.id)) ? "checked" : ""}
+    >
+    ${escapeHtml(brand.name)}
+  </label>
+  <br>
+`).join("")
       : "<p>Брендов пока нет.</p>"
   }
 </fieldset>
@@ -2721,6 +2696,7 @@ if (
       SELECT *
       FROM products
       WHERE id = ?
+        AND deleted = 0
     `).get(id);
 
   if (!product) {
@@ -2745,6 +2721,15 @@ if (
 
   const names =
     getProductCategoryNames(id);
+
+    const brand =
+  product.brand_id
+    ? db.prepare(`
+        SELECT name
+        FROM brands
+        WHERE id = ?
+      `).get(product.brand_id)?.name || ""
+    : "";
 
   const characteristics =
     getProductCharacteristics(id);
@@ -2771,6 +2756,8 @@ if (
         <h1>
           ${escapeHtml(product.name)}
         </h1>
+
+        <p>Бренд: ${escapeHtml(brand || "—")}</p>
 
         ${
           product.image
@@ -2819,8 +2806,8 @@ if (
         </p>
 
         <p>
-          <a href="//add/${id}">
-            В корзину
+<a href="/cart/add/${id}">
+              В корзину
           </a>
         </p>
 
@@ -4029,6 +4016,15 @@ ${
             return;
           }
 
+const priceError =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("priceError") || "";
+
+  const priceValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("price") || "";
 
           const cats =
             getCategories();
@@ -4063,16 +4059,22 @@ ${
                     >
                   </p>
 
-                  <p>
-                    Цена:
+                    <p>
+  Цена:
 
-                    <input
-                      type="number"
-                      name="price"
-                      min="0"
-                      required
-                    >
+  <input
+    type="number"
+    name="price"
+    min="0"
+    required
+    value="${priceValue || ""}"
+  >
+</p>
                   </p>
+
+                  <p style="color:red;">
+  ${priceError || ""}
+</p>  
 
                   <p>
                     Цена по запросу:
@@ -4271,6 +4273,11 @@ const params =
               params.get("price")
             );
 
+           if (price <= 0) {
+  return redirect(
+    res,
+`/add-product?price=${encodeURIComponent(params.get("price") || "")}&priceError=%D0%A6%D0%B5%D0%BD%D0%B0%20%D0%B4%D0%BE%D0%BB%D0%B6%D0%BD%D0%B0%20%D0%B1%D0%BE%D0%BB%D1%8C%D1%88%D0%B5%200.`  );
+}
 
           const description =
             params.get("description")
@@ -5095,15 +5102,9 @@ const availability =
               path.split("/")[2]
             );
 
-
-          db.prepare(`
-            DELETE FROM product_categories
-            WHERE product_id = ?
-          `).run(id);
-
-
-          db.prepare(`
-            DELETE FROM products
+         db.prepare(`
+            UPDATE products
+            SET deleted = 1
             WHERE id = ?
           `).run(id);
 
@@ -5114,6 +5115,122 @@ const availability =
           );
         }
 
+// ==================================================
+// УДАЛЁННЫЕ ТОВАРЫ — GET
+// ТОЛЬКО АДМИН
+// ==================================================
+
+if (
+  req.method === "GET" &&
+  path === "/admin/deleted-products"
+) {
+
+  if (
+    !requireAdmin(
+      req,
+      res
+    )
+  ) {
+    return;
+  }
+
+  const deletedProducts =
+    db.prepare(`
+      SELECT *
+      FROM products
+      WHERE deleted = 1
+      ORDER BY id DESC
+    `).all();
+
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      "Удалённые товары",
+      `
+        <h1>
+          Удалённые товары
+        </h1>
+
+        <p>
+          <a href="/admin">
+            ← Назад в админ-панель
+          </a>
+        </p>
+
+        ${
+          deletedProducts.length === 0
+            ? "<p>Удалённых товаров нет.</p>"
+            : `
+              <ul>
+                ${deletedProducts.map(product => `
+                  <li>
+                    <strong>
+                      ${escapeHtml(product.name)}
+                    </strong>
+
+                    <a href="/edit-product/${product.id}">
+                      Редактировать
+                    </a>
+
+                    <form
+                      method="POST"
+                      action="/admin/deleted-products/restore/${product.id}"
+                      style="display:inline"
+                    >
+                      <button type="submit">
+                        Восстановить
+                      </button>
+                    </form>
+
+                  </li>
+                `).join("")}
+              </ul>
+            `
+        }
+      `
+    )
+  );
+}
+
+// ==================================================
+// ВОССТАНОВИТЬ ТОВАР
+// ТОЛЬКО АДМИН
+// ==================================================
+
+if (
+  req.method === "POST" &&
+  path.startsWith(
+    "/admin/deleted-products/restore/"
+  )
+) {
+
+  if (
+    !requireAdmin(
+      req,
+      res
+    )
+  ) {
+    return;
+  }
+
+  const id =
+    Number(
+      path.split("/")[4]
+    );
+
+  db.prepare(`
+    UPDATE products
+    SET deleted = 0
+    WHERE id = ?
+      AND deleted = 1
+  `).run(id);
+
+  return redirect(
+    res,
+    "/admin/deleted-products"
+  );
+}
 
         // ==================================================
         // КАТЕГОРИИ — GET
@@ -5402,6 +5519,444 @@ const availability =
           );
         }
 
+            // ==================================================
+    // БРЕНДЫ — EDIT GET
+    // ТОЛЬКО АДМИН
+    // ==================================================
+
+    if (
+      req.method === "GET" &&
+      path.startsWith("/admin/brands/edit/")
+    ) {
+
+      if (
+        !requireAdmin(
+          req,
+          res
+        )
+      ) {
+        return;
+      }
+
+      const id =
+        Number(
+          path.split("/")[4]
+        );
+
+      const brand =
+        db.prepare(`
+          SELECT id, name
+          FROM brands
+          WHERE id = ?
+        `).get(id);
+
+      if (!brand) {
+
+        return sendHtml(
+          res,
+          renderPage(
+            req,
+            "Ошибка",
+            `
+              <h1>
+                Бренд не найден.
+              </h1>
+
+              <p>
+                <a href="/admin/brands">
+                  ← Назад к брендам
+                </a>
+              </p>
+            `
+          ),
+          404
+        );
+      }
+
+      return sendHtml(
+        res,
+        renderPage(
+          req,
+          "Редактирование бренда",
+          `
+            <h1>
+              Редактирование бренда
+            </h1>
+
+            <p>
+              <a href="/admin/brands">
+                ← Назад к брендам
+              </a>
+            </p>
+
+            <form
+              method="POST"
+              action="/admin/brands/edit/${brand.id}"
+            >
+
+              <p>
+                Название:
+
+                <input
+                  type="text"
+                  name="name"
+                  value="${escapeHtml(brand.name)}"
+                  required
+                >
+              </p>
+
+              <button>
+                Сохранить
+              </button>
+
+            </form>
+          `
+        )
+      );
+    }
+
+            // ==================================================
+    // БРЕНДЫ — POST
+    // ТОЛЬКО АДМИН
+    // ==================================================
+
+    if (
+      req.method === "POST" &&
+      path === "/admin/brands"
+    ) {
+
+      if (
+        !requireAdmin(
+          req,
+          res
+        )
+      ) {
+        return;
+      }
+
+      const params =
+        await readBody(req);
+
+      const name =
+        params.get("name")
+          ?.trim() || "";
+
+      if (!name) {
+
+        return sendHtml(
+          res,
+          renderPage(
+            req,
+            "Ошибка",
+            `
+              <h1>
+                Введите название бренда.
+              </h1>
+            `
+          ),
+          400
+        );
+      }
+
+      db.prepare(`
+        INSERT INTO brands
+        (
+          name
+        )
+        VALUES (?)
+      `).run(
+        name
+      );
+
+      return redirect(
+        res,
+        "/admin/brands"
+      );
+    }
+
+        // ==================================================
+    // БРЕНДЫ — EDIT POST
+    // ТОЛЬКО АДМИН
+    // ==================================================
+
+    if (
+      req.method === "POST" &&
+      path.startsWith("/admin/brands/edit/")
+    ) {
+
+      if (
+        !requireAdmin(
+          req,
+          res
+        )
+      ) {
+        return;
+      }
+
+      const id =
+        Number(
+          path.split("/")[4]
+        );
+
+      const params =
+        await readBody(req);
+
+      const name =
+        params.get("name")
+          ?.trim() || "";
+
+      if (!name) {
+
+        return sendHtml(
+          res,
+          renderPage(
+            req,
+            "Ошибка",
+            `
+              <h1>
+                Введите название бренда.
+              </h1>
+            `
+          ),
+          400
+        );
+      }
+
+      const brand =
+        db.prepare(`
+          SELECT id
+          FROM brands
+          WHERE id = ?
+        `).get(id);
+
+      if (!brand) {
+
+        return sendHtml(
+          res,
+          renderPage(
+            req,
+            "Ошибка",
+            `
+              <h1>
+                Бренд не найден.
+              </h1>
+            `
+          ),
+          404
+        );
+      }
+
+      db.prepare(`
+        UPDATE brands
+        SET name = ?
+        WHERE id = ?
+      `).run(
+        name,
+        id
+      );
+
+      return redirect(
+        res,
+        "/admin/brands"
+      );
+    }
+
+        // ==================================================
+    // БРЕНДЫ — DELETE
+    // ТОЛЬКО АДМИН
+    // ==================================================
+
+    if (
+      req.method === "POST" &&
+      path.startsWith("/admin/brands/delete/")
+    ) {
+
+      if (
+        !requireAdmin(
+          req,
+          res
+        )
+      ) {
+        return;
+      }
+
+      const id =
+        Number(
+          path.split("/")[4]
+        );
+
+      const brand =
+        db.prepare(`
+          SELECT id, name
+          FROM brands
+          WHERE id = ?
+        `).get(id);
+
+      if (!brand) {
+
+        return sendHtml(
+          res,
+          renderPage(
+            req,
+            "Ошибка",
+            `
+              <h1>
+                Бренд не найден.
+              </h1>
+            `
+          ),
+          404
+        );
+      }
+
+      const productsCount =
+        db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM products
+          WHERE brand_id = ?
+        `).get(id).count;
+
+      if (productsCount > 0) {
+
+        return sendHtml(
+          res,
+          renderPage(
+            req,
+            "Ошибка",
+            `
+              <h1>
+                Нельзя удалить бренд.
+              </h1>
+
+              <p>
+                Бренд используется товарами:
+                ${productsCount}
+              </p>
+
+              <p>
+                <a href="/admin/brands">
+                  ← Назад к брендам
+                </a>
+              </p>
+            `
+          ),
+          400
+        );
+      }
+
+      db.prepare(`
+        DELETE FROM brands
+        WHERE id = ?
+      `).run(id);
+
+      return redirect(
+        res,
+        "/admin/brands"
+      );
+    }
+
+        // ==================================================
+        // БРЕНДЫ — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/brands"
+        ) {
+
+          if (
+            !requireAdmin(
+              req,
+              res
+            )
+          ) {
+            return;
+          }
+
+          const brands =
+            db.prepare(`
+              SELECT id, name
+              FROM brands
+              ORDER BY name
+            `).all();
+
+
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Бренды",
+              `
+                <h1>
+                  Управление брендами
+                </h1>
+
+                <p>
+                  <a href="/admin">
+                    ← Назад в админ-панель
+                  </a>
+                </p>
+
+                <h2>
+                  Бренды
+                </h2>
+
+<h2>
+  Добавить бренд
+</h2>
+
+<form
+  method="POST"
+  action="/admin/brands"
+>
+  <p>
+    Название:
+
+    <input
+      type="text"
+      name="name"
+      required
+    >
+  </p>
+
+  <button>
+    Добавить бренд
+  </button>
+</form>
+
+<hr>
+
+                <ul>
+                  ${
+                    brands.map(brand => `
+                      <li>
+                        <li>
+  ${escapeHtml(brand.name)}
+
+  <a href="/admin/brands/edit/${brand.id}">
+    Изменить
+  </a>
+
+  <form
+    method="POST"
+    action="/admin/brands/delete/${brand.id}"
+    style="display:inline"
+  >
+    <button type="submit">
+      Удалить
+    </button>
+  </form>
+</li>
+                      </li>
+                    `).join("")
+                  }
+                </ul>
+              `
+            )
+          );
+        }
 
         // ==================================================
         // РЕДАКТИРОВАТЬ КАТЕГОРИЮ — GET
