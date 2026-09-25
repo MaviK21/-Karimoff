@@ -451,14 +451,17 @@ function getCategoryProductCounts() {
     FROM categories c
 
     LEFT JOIN products p
-      ON p.category_id = c.id
-      OR EXISTS (
+  ON p.deleted = 0
+  AND (
+    p.category_id = c.id
+          OR EXISTS (
         SELECT 1
         FROM product_categories pc
         WHERE
           pc.product_id = p.id
           AND pc.category_id = c.id
       )
+    )
 
     GROUP BY c.id
   `).all();
@@ -537,7 +540,8 @@ function renderCategoryOptions(
   parentId = null,
   level = 0,
   selectedId = null,
-  excludeId = null
+  excludeId = null,
+  selectedIds = []
 ) {
   let html = "";
 
@@ -555,10 +559,11 @@ function renderCategoryOptions(
     }
 
     const selected =
-      Number(selectedId) ===
-      Number(category.id)
-        ? "selected"
-        : "";
+  selectedIds.includes(
+    String(category.id)
+  )
+    ? "selected"
+    : "";
 
     html += `
       <option
@@ -571,13 +576,14 @@ function renderCategoryOptions(
     `;
 
     html +=
-      renderCategoryOptions(
-        categories,
-        category.id,
-        level + 1,
-        selectedId,
-        excludeId
-      );
+  renderCategoryOptions(
+    categories,
+    category.id,
+    level + 1,
+    selectedId,
+    excludeId,
+    selectedIds
+  );
   }
 
   return html;
@@ -1199,7 +1205,7 @@ if (
     ? db.prepare(`
         SELECT id, name, sku
         FROM products
-        WHERE deleted = 0Ы
+        WHERE deleted = 0
         ORDER BY name
       `).all().filter(product => {
         const name =
@@ -1948,6 +1954,131 @@ if (
           );
         }
 
+// ==================================================
+// БРЕНДЫ — GET
+// ПУБЛИЧНАЯ СТРАНИЦА
+// ==================================================
+
+if (
+  req.method === "GET" &&
+  path === "/brands"
+) {
+
+  const brands =
+    db.prepare(`
+      SELECT id, name
+      FROM brands
+      ORDER BY name
+    `).all();
+
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      "Бренды",
+      `
+        <h1>Бренды</h1>
+
+        <ul>
+          ${brands.map(brand => `
+            <li>
+              <a href="/brand/${brand.id}">
+                ${escapeHtml(brand.name)}
+              </a>
+            </li>
+          `).join("")}
+        </ul>
+      `
+    )
+  );
+}
+
+// ==================================================
+// БРЕНД — GET
+// ПУБЛИЧНАЯ СТРАНИЦА
+// ==================================================
+
+if (
+  req.method === "GET" &&
+  path.startsWith("/brand/")
+) {
+
+  const id =
+    Number(
+      path.split("/")[2]
+    );
+
+  const brand =
+    db.prepare(`
+      SELECT id, name
+      FROM brands
+      WHERE id = ?
+    `).get(id);
+
+  if (!brand) {
+    return sendHtml(
+      res,
+      renderPage(
+        req,
+        "Бренд не найден",
+        `
+          <h1>Бренд не найден</h1>
+
+          <p>
+            <a href="/brands">
+              ← Вернуться к брендам
+            </a>
+          </p>
+        `
+      )
+    );
+  }
+
+  const products =
+    db.prepare(`
+      SELECT *
+      FROM products
+      WHERE brand_id = ?
+        AND deleted = 0
+      ORDER BY id DESC
+    `).all(brand.id);
+
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      brand.name,
+      `
+        <h1>
+          ${escapeHtml(brand.name)}
+        </h1>
+
+        <p>
+          <a href="/brands">
+            ← Все бренды
+          </a>
+        </p>
+
+        ${
+          products.length === 0
+            ? "<p>Товаров этого бренда пока нет.</p>"
+            : `
+              <ul>
+                ${products.map(product => `
+                  <li>
+                    <a href="/product/${product.id}">
+                      ${escapeHtml(product.name)}
+                    </a>
+                  </li>
+                `).join("")}
+              </ul>
+            `
+        }
+      `
+    )
+  );
+}
+
       // ==================================================
 // КАТАЛОГ
 // ==================================================
@@ -2059,21 +2190,26 @@ const catalogStateHiddenHtml = `
         SELECT DISTINCT p.*
         FROM products p
 
-        LEFT JOIN product_categories pc
-          ON pc.product_id = p.id
+LEFT JOIN product_categories pc
+  ON pc.product_id = p.id
 
-        WHERE
-          p.deleted = 0
-          AND (
+LEFT JOIN categories c
+  ON c.id = ?
+  
+WHERE
+  p.deleted = 0
+  AND c.hidden = 0
+  AND (
             p.category_id = ?
             OR pc.category_id = ?
           )
 
         ORDER BY p.id DESC
       `).all(
-        Number(categoryFilter),
-        Number(categoryFilter)
-      );
+  Number(categoryFilter),
+  Number(categoryFilter),
+  Number(categoryFilter)
+);
 
   } else {
 
@@ -2310,6 +2446,24 @@ if (selectedCharacteristicIds.length > 0) {
             }
           </p>
 
+          <p>
+  ${
+    Number(product.discount_percent) > 0
+      ? "Акция "
+      : ""
+  }
+  ${
+    product.is_new
+      ? "Новинка "
+      : ""
+  }
+  ${
+    product.is_hit
+      ? "Хит"
+      : ""
+  }
+</p>
+
           ${
             names.length
               ? `
@@ -2351,16 +2505,6 @@ if (selectedCharacteristicIds.length > 0) {
                   <a href="/edit-product/${product.id}">
                     Редактировать
                   </a>
-
-                  <form
-                    method="POST"
-                    action="/admin/deleted-products/restore/${product.id}"
-                    style="display:inline"
-                  >
-                    <button type="submit">
-                      Восстановить
-                    </button>
-                  </form>
 
                   |
                   <a
@@ -2776,10 +2920,15 @@ if (
         <p>
           <strong>
             ${
-              product.price_on_request
-                ? "Цена по запросу"
-                : `${product.price} ${product.currency} / ${product.unit}`
-            }
+  product.price_on_request
+    ? "Цена по запросу"
+    : Number(product.discount_percent) > 0
+      ? `<s>${product.price} ${product.currency}</s>
+         → ${product.price * (1 - product.discount_percent / 100)}
+         ${product.currency} / ${product.unit}
+         (−${product.discount_percent}%)`
+      : `${product.price} ${product.currency} / ${product.unit}`
+}
           </strong>
         </p>
 
@@ -2791,6 +2940,24 @@ if (
               : product.availability === "on_order"
                 ? "Под заказ"
                 : "Нет в наличии"
+          }
+        </p>
+
+                <p>
+          ${
+            Number(product.discount_percent) > 0
+              ? "Акция "
+              : ""
+          }
+          ${
+            product.is_new
+              ? "Новинка "
+              : ""
+          }
+          ${
+            product.is_hit
+              ? "Хит"
+              : ""
           }
         </p>
 
@@ -2979,6 +3146,7 @@ if (
               SELECT id, currency
               FROM products
               WHERE id = ?
+                  AND deleted = 0
               `).get(id);
 
 
@@ -3821,6 +3989,7 @@ ORDER BY id DESC
               SELECT *
               FROM orders
               WHERE id = ?
+                  AND deleted = 0
             `).get(orderId);
 
 
@@ -4021,10 +4190,62 @@ const priceError =
     req.url.split("?")[1] || ""
   ).get("priceError") || "";
 
+  const sortOrderError =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("sortOrderError") || "";
+
   const priceValue =
   new URLSearchParams(
     req.url.split("?")[1] || ""
   ).get("price") || "";
+
+const discountValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("discount") || "0";
+
+  const unitValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("unit") || "шт.";
+
+  const nameValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("name") || "";
+
+  const skuValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("sku") || "";
+
+const brandValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("brand_id") || "";
+
+  const currencyValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("currency") || "";
+
+  const availabilityValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("availability") || "";
+
+  const categoryValues =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("category_ids")
+    ?.split(",")
+    .filter(Boolean) || [];
+
+  const descriptionValue =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("description") || "";
 
           const cats =
             getCategories();
@@ -4032,6 +4253,48 @@ const priceError =
           const categoryCharacteristicRows =
             getCategoryCharacteristicRows();
 
+           const characteristicValues =
+  new Map();
+
+const characteristicsParam =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("characteristics") || "";
+
+for (
+  const item of characteristicsParam.split("|")
+) {
+  if (!item) {
+    continue;
+  }
+
+  const separatorIndex =
+    item.indexOf(":");
+
+  if (separatorIndex === -1) {
+    continue;
+  }
+
+  const id =
+    Number(
+      item.slice(0, separatorIndex)
+    );
+
+  const value =
+    item.slice(
+      separatorIndex + 1
+    );
+
+  if (
+    Number.isInteger(id) &&
+    value
+  ) {
+    characteristicValues.set(
+      id,
+      value
+    );
+  }
+}
 
           return sendHtml(
             res,
@@ -4050,15 +4313,15 @@ const priceError =
                 >
 
                   <p>
-                    Название:
+  Название:
 
-                    <input
-                      type="text"
-                      name="name"
-                      required
-                    >
-                  </p>
-
+  <input
+    type="text"
+    name="name"
+    required
+    value="${escapeHtml(nameValue)}"
+  >
+</p>
                     <p>
   Цена:
 
@@ -4069,7 +4332,7 @@ const priceError =
     required
     value="${priceValue || ""}"
   >
-</p>
+
                   </p>
 
                   <p style="color:red;">
@@ -4094,30 +4357,65 @@ const priceError =
                     min="0"
                     max="100"
                     step="1"
-                    value="0"
-                  >
+                    value="${escapeHtml(discountValue)}"                  >
                 </p>
+
+                <p>
+  <label>
+    <input
+      type="checkbox"
+      name="is_new"
+      value="1"
+    >
+    Новинка
+  </label>
+</p>
+
+<p>
+  <label>
+    <input
+      type="checkbox"
+      name="is_hit"
+      value="1"
+    >
+    Хит
+  </label>
+</p>
+
+<p>
+  Порядок:
+
+  <input
+    type="number"
+    name="sort_order"
+    value="0"
+  >
+</p>
+
+<p style="color:red;">
+  ${sortOrderError || ""}
+</p>
 
                   <p>
                     Единица измерения:
 
                  <select name="unit">
-                  <option value="шт." selected>шт. — штука</option>
-                  <option value="компл.">компл. — комплект</option>
-                  <option value="кг">кг — килограмм</option>
-                  <option value="г">г — грамм</option>
-                  <option value="т">т — тонна</option>
-                  <option value="м">м — метр</option>
-                  <option value="см">см — сантиметр</option>
-                  <option value="мм">мм — миллиметр</option>
-                  <option value="км">км — километр</option>
-                  <option value="м²">м² — квадратный метр</option>
-                  <option value="см²">см² — квадратный сантиметр</option>
-                  <option value="м³">м³ — кубический метр</option>
-                  <option value="л">л — литр</option>
-                  <option value="мл">мл — миллилитр</option>
-                  <option value="ч">ч — час</option>
-                  <option value="мин">мин — минута</option>
+                  <option value="шт." ${unitValue === "шт." ? "selected" : ""}>шт. — штука</option>
+                  <option value="компл." ${unitValue === "компл." ? "selected" : ""}>компл. — комплект</option>
+                  <option value="кг" ${unitValue === "кг" ? "selected" : ""}>кг — килограмм</option>
+                  <option value="г" ${unitValue === "г" ? "selected" : ""}>г — грамм</option>
+                  <option value="т" ${unitValue === "т" ? "selected" : ""}>т — тонна</option>
+                  <option value="м" ${unitValue === "м" ? "selected" : ""}>м — метр</option>
+                  <option value="см" ${unitValue === "см" ? "selected" : ""}>см — сантиметр</option>
+                  <option value="мм" ${unitValue === "мм" ? "selected" : ""}>мм — миллиметр</option>
+                  <option value="км" ${unitValue === "км" ? "selected" : ""}>км — километр</option>
+                  <option value="м²" ${unitValue === "м²" ? "selected" : ""}>м² — квадратный метр</option>
+                  <option value="см²" ${unitValue === "см²" ? "selected" : ""}>см² — квадратный сантиметр</option>
+                  <option value="м³" ${unitValue === "м³" ? "selected" : ""}>м³ — кубический метр</option>
+                  <option value="л" ${unitValue === "л" ? "selected" : ""}>л — литр</option>
+                  <option value="мл" ${unitValue === "мл" ? "selected" : ""}>мл — миллилитр</option>
+                  <option value="ч" ${unitValue === "ч" ? "selected" : ""}>ч — час</option>
+                  <option value="мин" ${unitValue === "мин" ? "selected" : ""}>мин — минута</option>
                   </select>
                   </p>
 
@@ -4127,9 +4425,9 @@ const priceError =
                     <br>
 
                     <textarea
-                      name="description"
-                      required
-                    ></textarea>
+  name="description"
+  required
+>${escapeHtml(descriptionValue)}</textarea>
                   </p>
 
                                     <p>
@@ -4149,11 +4447,12 @@ const priceError =
 
                     <br>
 
-                    <input
-                      type="text"
-                      name="sku"
-                      placeholder="Например: DEWALT-DCD777"
-                    >
+                   <input
+  type="text"
+  name="sku"
+  placeholder="Например: DEWALT-DCD777"
+  value="${escapeHtml(skuValue)}"
+>
                   </p>
 
                   <p>
@@ -4164,7 +4463,7 @@ const priceError =
                     <select name="brand_id">
   <option value="">Без бренда</option>
   ${db.prepare("SELECT id, name FROM brands ORDER BY name").all().map(brand => `
-    <option value="${brand.id}">${escapeHtml(brand.name)}</option>
+<option value="${brand.id}" ${String(brand.id) === String(brandValue) ? "selected" : ""}>${escapeHtml(brand.name)}</option>
   `).join("")}
 </select>
                   </p>
@@ -4173,8 +4472,8 @@ const priceError =
                     Валюта:
 
                     <select name="currency">
-                      <option value="BYN">BYN</option>
-                      <option value="USD">USD</option>
+                      <option value="BYN" ${currencyValue === "BYN" ? "selected" : ""}>BYN</option>
+                      <option value="USD" ${currencyValue === "USD" ? "selected" : ""}>USD</option>
                     </select>
                   </p>
 
@@ -4183,9 +4482,9 @@ const priceError =
                     Наличие:
 
                     <select name="availability">
-                      <option value="in_stock">В наличии</option>
-                      <option value="on_order">Под заказ</option>
-                      <option value="out_of_stock">Нет в наличии</option>
+                      <option value="in_stock" ${availabilityValue === "in_stock" ? "selected" : ""}>В наличии</option>
+                      <option value="on_order" ${availabilityValue === "on_order" ? "selected" : ""}>Под заказ</option>
+                      <option value="out_of_stock" ${availabilityValue === "out_of_stock" ? "selected" : ""}>Нет в наличии</option>
                     </select>
                   </p>
 
@@ -4202,8 +4501,13 @@ const priceError =
                     >
 
                       ${renderCategoryOptions(
-                        cats
-                      )}
+  cats,
+  null,
+  0,
+  null,
+  null,
+  categoryValues
+)}
 
                     </select>
                   </p>
@@ -4214,7 +4518,8 @@ const priceError =
                   </p>
 
                   ${renderCharacteristicInputs(
-                    categoryCharacteristicRows
+                    categoryCharacteristicRows,
+                    characteristicValues
                   )}
 
                   <button>
@@ -4273,10 +4578,23 @@ const params =
               params.get("price")
             );
 
+            const submittedCharacteristics =
+  getSubmittedCharacteristicValues(
+    params,
+    getCharacteristics()
+  );
+
+
+  
            if (price <= 0) {
   return redirect(
     res,
-`/add-product?price=${encodeURIComponent(params.get("price") || "")}&priceError=%D0%A6%D0%B5%D0%BD%D0%B0%20%D0%B4%D0%BE%D0%BB%D0%B6%D0%BD%D0%B0%20%D0%B1%D0%BE%D0%BB%D1%8C%D1%88%D0%B5%200.`  );
+`/add-product?name=${encodeURIComponent(params.get("name") || "")}&sku=${encodeURIComponent(params.get("sku") || "")}&brand_id=${encodeURIComponent(params.get("brand_id") || "")}&currency=${encodeURIComponent(params.get("currency") || "")}&availability=${encodeURIComponent(params.get("availability") || "")}&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}&price=&characteristics=${encodeURIComponent(
+  submittedCharacteristics
+    .map(item => `${item.characteristicId}:${item.value}`)
+    .join("|")
+)}&price=${encodeURIComponent(params.get("price") || "")}&description=${encodeURIComponent(params.get("description") || "")}&discount=${encodeURIComponent(params.get("discount_percent") || "0")}&unit=${encodeURIComponent(params.get("unit") || "шт.")}&priceError=%D0%A6%D0%B5%D0%BD%D0%B0%20%D0%B4%D0%BE%D0%BB%D0%B6%D0%BD%D0%B0%20%D0%B1%D1%8B%D1%82%D1%8C%20%D0%B1%D0%BE%D0%BB%D1%8C%D1%88%D0%B5%200.`
+  );
 }
 
           const description =
@@ -4313,6 +4631,40 @@ const image =
 
         const unit =
           params.get("unit") || "шт.";
+
+const isNew =
+  params.get("is_new") === "1"
+    ? 1
+    : 0;
+
+const isHit =
+  params.get("is_hit") === "1"
+    ? 1
+    : 0;
+
+    const sortOrder =
+  Number(
+    params.get("sort_order") || 0
+  );
+
+  if (sortOrder < 1) {
+  return redirect(
+    res,
+    `/add-product?name=${encodeURIComponent(params.get("name") || "")}` +
+      `&sku=${encodeURIComponent(params.get("sku") || "")}` +
+      `&brand_id=${encodeURIComponent(params.get("brand_id") || "")}` +
+      `&currency=${encodeURIComponent(params.get("currency") || "")}` +
+      `&availability=${encodeURIComponent(params.get("availability") || "")}` +
+      `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+      `&price=${encodeURIComponent(params.get("price") || "")}` +
+      `&description=${encodeURIComponent(params.get("description") || "")}` +
+      `&discount=${encodeURIComponent(params.get("discount_percent") || "0")}` +
+      `&unit=${encodeURIComponent(params.get("unit") || "шт.")}` +
+      `&sort_order=${encodeURIComponent(params.get("sort_order") || "")}` +
+      `&sortOrderError=${encodeURIComponent("Порядок должен быть больше 0.")}`
+  );
+}
+
           const categoryIds =
             params
               .getAll("category_ids")
@@ -4353,6 +4705,7 @@ const image =
             );
           }
 
+      
 
           const result =
             db.prepare(`
@@ -4369,10 +4722,12 @@ const image =
               availability,
               price_on_request,
               unit,
-              discount_percent
+              discount_percent,
+              is_new,
+              is_hit,
+              sort_order
             )
-              
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
             name,
             price,
@@ -4386,7 +4741,10 @@ const image =
             availability,
             priceOnRequest,
             unit,
-            discountPercent
+            discountPercent,
+            isNew,
+            isHit,
+            sortOrder
           );
 
 
@@ -4877,6 +5235,40 @@ const image =
                   </select>
                 </p>
 
+                                 <p>
+                   <label>
+                     <input
+                       type="checkbox"
+                       name="is_new"
+                       value="1"
+                       ${product.is_new ? "checked" : ""}
+                     >
+                     Новинка
+                   </label>
+                 </p>
+
+                 <p>
+  <label>
+    <input
+      type="checkbox"
+      name="is_hit"
+      value="1"
+      ${product.is_hit ? "checked" : ""}
+    >
+    Хит
+  </label>
+</p>
+
+<p>
+  Порядок:
+
+  <input
+    type="number"
+    name="sort_order"
+    value="${product.sort_order}"
+  >
+</p>
+
                   ${characteristicsHtml}  
 
                   <p>
@@ -4993,6 +5385,21 @@ const availability =
     const unit =
   params.get("unit") || "шт.";
 
+const isNew =
+  params.get("is_new") === "1"
+    ? 1
+    : 0;
+
+const isHit =
+  params.get("is_hit") === "1"
+    ? 1
+    : 0;
+
+    const sortOrder =
+  Number(
+    params.get("sort_order") || 0
+  );
+
   const categoryIds = params
     .getAll("category_ids")
     .map(Number)
@@ -5027,7 +5434,10 @@ const availability =
       availability = ?,
       price_on_request = ?,
       unit = ?,
-      discount_percent = ?
+      discount_percent = ?,
+      is_new = ?,
+      is_hit = ?,
+      sort_order = ?
       WHERE id = ?
 
   `).run(
@@ -5043,6 +5453,9 @@ const availability =
     priceOnRequest,
     unit,
     discountPercent,
+    isNew,
+    isHit,
+    sortOrder,
     id,
   );
 
