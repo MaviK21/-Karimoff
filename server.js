@@ -4195,6 +4195,11 @@ const priceError =
     req.url.split("?")[1] || ""
   ).get("sortOrderError") || "";
 
+  const queryParams =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  );
+
   const priceValue =
   new URLSearchParams(
     req.url.split("?")[1] || ""
@@ -4889,6 +4894,16 @@ const isHit =
               valuesByCharacteristicId
             );
 
+            const sortOrderError =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("sortOrderError") || "";
+
+  const queryParams =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  );
+
           return sendHtml(
             res,
             renderPage(
@@ -4912,8 +4927,9 @@ const isHit =
                       type="text"
                       name="name"
                       value="${escapeHtml(
-                        product.name
-                      )}"
+  queryParams.get("name") ?? product.name
+)}"
+
                       required
                     >
                   </p>
@@ -4925,7 +4941,7 @@ const isHit =
                       type="number"
                       name="price"
                       min="0"
-                      value="${product.price}"
+                      value="${priceValue || product.price}"
                       required
                     >
                   </p>
@@ -5269,6 +5285,10 @@ const isHit =
   >
 </p>
 
+<p style="color:red;">
+  ${sortOrderError || ""}
+</p>
+
                   ${characteristicsHtml}  
 
                   <p>
@@ -5279,10 +5299,11 @@ const isHit =
                     <textarea
                       name="description"
                       required
-                    >${escapeHtml(
-                      product.description ||
-                      ""
-                    )}</textarea>
+                    >
+                    ${escapeHtml(
+  queryParams.get("description") ?? product.description ?? ""
+)}
+                    </textarea>
                   </p>
 
                   <p>
@@ -5399,6 +5420,16 @@ const isHit =
   Number(
     params.get("sort_order") || 0
   );
+
+if (sortOrder < 1) {
+  return redirect(
+    res,
+    `/edit-product/${id}?name=${encodeURIComponent(params.get("name") || "")}` +
+      `&description=${encodeURIComponent(params.get("description") || "")}` +
+      `&price=${encodeURIComponent(params.get("price") || "")}` +
+      `&sortOrderError=${encodeURIComponent("Порядок должен быть больше 0.")}`
+  );
+}
 
   const categoryIds = params
     .getAll("category_ids")
