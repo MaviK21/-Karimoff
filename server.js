@@ -2438,7 +2438,7 @@ if (selectedCharacteristicIds.length > 0) {
           <p>
             Наличие:
             ${
-              product.availability === "in_stock"
+product.availability === "in_stock"
                 ? "В наличии"
                 : product.availability === "on_order"
                   ? "Под заказ"
@@ -4487,10 +4487,10 @@ for (
                     Наличие:
 
                     <select name="availability">
-                      <option value="in_stock" ${availabilityValue === "in_stock" ? "selected" : ""}>В наличии</option>
-                      <option value="on_order" ${availabilityValue === "on_order" ? "selected" : ""}>Под заказ</option>
-                      <option value="out_of_stock" ${availabilityValue === "out_of_stock" ? "selected" : ""}>Нет в наличии</option>
-                    </select>
+                      <option value="in_stock" ${(availabilityValue ?? product.availability) === "in_stock" ? "selected" : ""}>В наличии</option>
+                      <option value="on_order" ${(availabilityValue ?? product.availability) === "on_order" ? "selected" : ""}>Под заказ</option>
+                      <option value="out_of_stock" ${(availabilityValue ?? product.availability) === "out_of_stock" ? "selected" : ""}>Нет в наличии</option>
+                    </select>                               
                   </p>
 
                   <p>
@@ -4842,10 +4842,21 @@ const isHit =
           const cats =
             getCategories();
 
-          const selectedIds =
-            getProductCategoryIds(
-              id
-            );
+const queryParams =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  );
+
+          const categoryIdsParam =
+  queryParams.get("category_ids");
+
+const selectedIds =
+  categoryIdsParam !== null
+    ? categoryIdsParam
+        .split(",")
+        .filter(Boolean)
+        .map(Number)
+    : getProductCategoryIds(id);
 
           const categoryCharacteristicRows =
             getCategoryCharacteristicRows();
@@ -4899,10 +4910,29 @@ const isHit =
     req.url.split("?")[1] || ""
   ).get("sortOrderError") || "";
 
-  const queryParams =
-  new URLSearchParams(
-    req.url.split("?")[1] || ""
-  );
+  const priceValue =
+  queryParams.get("price") || "";
+
+  const discountValue =
+  queryParams.get("discount") || "";
+
+  const unitValue =
+  queryParams.get("unit");
+
+  const skuValue =
+  queryParams.get("sku");
+
+  const brandValue =
+  queryParams.get("brand_id");
+
+  const currencyValue =
+  queryParams.get("currency");
+
+  const availabilityValue =
+  queryParams.get("availability");
+
+  const priceOnRequestValue =
+  queryParams.get("price_on_request") === "1";
 
           return sendHtml(
             res,
@@ -4955,8 +4985,8 @@ const isHit =
                       min="0"
                       max="100"
                       step="1"
-                      value="${product.discount_percent || 0}"
-                    >
+                      value="${discountValue || product.discount_percent || 0}"                    
+                      >
                   </p>
 
                   <p>
@@ -4966,11 +4996,11 @@ const isHit =
                       type="checkbox"
                       name="price_on_request"
                       value="1"
-                      ${
-                        product.price_on_request
-                          ? "checked"
-                          : ""
-                      }
+                     ${
+  priceOnRequestValue || product.price_on_request
+    ? "checked"
+    : ""
+}
                     >
                   </p>
 
@@ -4980,11 +5010,13 @@ const isHit =
                   <select name="unit">
                     <option
                       value="шт."
+
                       ${
-                        product.unit === "шт."
-                          ? "selected"
-                          : ""
-                      }
+  (unitValue ?? product.unit) === "шт."
+    ? "selected"
+    : ""
+}
+
                     >
                       шт. — штука
                     </option>
@@ -4992,7 +5024,7 @@ const isHit =
                     <option
                       value="компл."
                       ${
-                        product.unit === "компл."
+                        (unitValue ?? product.unit) === "компл."
                           ? "selected"
                           : ""
                       }
@@ -5003,7 +5035,7 @@ const isHit =
                     <option
                       value="кг"
                       ${
-                        product.unit === "кг"
+                        (unitValue ?? product.unit) === "кг"
                           ? "selected"
                           : ""
                       }
@@ -5014,7 +5046,7 @@ const isHit =
                     <option
                       value="г"
                       ${
-                        product.unit === "г"
+                        (unitValue ?? product.unit) === "г"
                           ? "selected"
                           : ""
                       }
@@ -5025,7 +5057,7 @@ const isHit =
                     <option
                       value="т"
                       ${
-                        product.unit === "т"
+                        (unitValue ?? product.unit) === "т"
                           ? "selected"
                           : ""
                       }
@@ -5036,7 +5068,7 @@ const isHit =
                     <option
                       value="м"
                       ${
-                        product.unit === "м"
+                        (unitValue ?? product.unit) === "м"
                           ? "selected"
                           : ""
                       }
@@ -5047,7 +5079,7 @@ const isHit =
                     <option
                       value="см"
                       ${
-                        product.unit === "см"
+                        (unitValue ?? product.unit) === "см"
                           ? "selected"
                           : ""
                       }
@@ -5058,7 +5090,7 @@ const isHit =
                     <option
                       value="мм"
                       ${
-                        product.unit === "мм"
+                        (unitValue ?? product.unit) === "мм"
                           ? "selected"
                           : ""
                       }
@@ -5069,7 +5101,7 @@ const isHit =
                     <option
                       value="км"
                       ${
-                        product.unit === "км"
+                        (unitValue ?? product.unit) === "км"
                           ? "selected"
                           : ""
                       }
@@ -5080,7 +5112,7 @@ const isHit =
                     <option
                       value="м²"
                       ${
-                        product.unit === "м²"
+                        (unitValue ?? product.unit) === "м²"
                           ? "selected"
                           : ""
                       }
@@ -5091,7 +5123,7 @@ const isHit =
                     <option
                       value="см²"
                       ${
-                        product.unit === "см²"
+                        (unitValue ?? product.unit) === "см²"
                           ? "selected"
                           : ""
                       }
@@ -5102,7 +5134,7 @@ const isHit =
                     <option
                       value="м³"
                       ${
-                        product.unit === "м³"
+                        (unitValue ?? product.unit) === "м³"
                           ? "selected"
                           : ""
                       }
@@ -5113,7 +5145,7 @@ const isHit =
                     <option
                       value="л"
                       ${
-                        product.unit === "л"
+                        (unitValue ?? product.unit) === "л"
                           ? "selected"
                           : ""
                       }
@@ -5124,7 +5156,7 @@ const isHit =
                     <option
                       value="мл"
                       ${
-                        product.unit === "мл"
+                        (unitValue ?? product.unit) === "мл"
                           ? "selected"
                           : ""
                       }
@@ -5135,7 +5167,7 @@ const isHit =
                     <option
                       value="ч"
                       ${
-                        product.unit === "ч"
+                        (unitValue ?? product.unit) === "ч"
                           ? "selected"
                           : ""
                       }
@@ -5146,7 +5178,7 @@ const isHit =
                     <option
                       value="мин"
                       ${
-                        product.unit === "мин"
+                        (unitValue ?? product.unit) === "мин"
                           ? "selected"
                           : ""
                       }
@@ -5164,7 +5196,7 @@ const isHit =
                    <input
                      type="text"
                      name="sku"
-                     value="${escapeHtml(product.sku || "")}"
+value="${escapeHtml(skuValue ?? product.sku ?? "")}"
                    >
                  </p>
 
@@ -5176,8 +5208,9 @@ const isHit =
                    <select name="brand_id">
   <option value="">Без бренда</option>
   ${db.prepare("SELECT id, name FROM brands ORDER BY name").all().map(brand => `
-    <option value="${brand.id}" ${product.brand_id === brand.id ? "selected" : ""}>
-      ${escapeHtml(brand.name)}
+<option value="${brand.id}" ${(brandValue ?? product.brand_id) === String(brand.id) ? "selected" : ""}>
+
+${escapeHtml(brand.name)}
     </option>
   `).join("")}
 
@@ -5191,7 +5224,7 @@ const isHit =
                       <option
                         value="BYN"
                         ${
-                          product.currency === "BYN"
+                          (currencyValue ?? product.currency) === "BYN"
                             ? "selected"
                             : ""
                         }
@@ -5202,7 +5235,7 @@ const isHit =
                       <option
                         value="USD"
                         ${
-                          product.currency === "USD"
+                          (currencyValue ?? product.currency) === "USD"
                             ? "selected"
                             : ""
                         }
@@ -5219,7 +5252,7 @@ const isHit =
                     <option
                       value="in_stock"
                       ${
-                        product.availability === "in_stock"
+                        (availabilityValue ?? product.availability) === "in_stock"
                           ? "selected"
                           : ""
                       }
@@ -5230,7 +5263,7 @@ const isHit =
                     <option
                       value="on_order"
                       ${
-                        product.availability === "on_order"
+                        (availabilityValue ?? product.availability) === "on_order"
                           ? "selected"
                           : ""
                       }
@@ -5241,7 +5274,7 @@ const isHit =
                     <option
                       value="out_of_stock"
                       ${
-                        product.availability === "out_of_stock"
+                        (availabilityValue ?? product.availability) === "out_of_stock"
                           ? "selected"
                           : ""
                       }
@@ -5427,9 +5460,17 @@ if (sortOrder < 1) {
     `/edit-product/${id}?name=${encodeURIComponent(params.get("name") || "")}` +
       `&description=${encodeURIComponent(params.get("description") || "")}` +
       `&price=${encodeURIComponent(params.get("price") || "")}` +
+      `&discount=${encodeURIComponent(params.get("discount_percent") || "")}` +
+      `&price_on_request=${params.get("price_on_request") === "1" ? "1" : "0"}` + 
+      `&unit=${encodeURIComponent(params.get("unit") || "")}` +
+      `&sku=${encodeURIComponent(params.get("sku") || "")}` +
+      `&brand_id=${encodeURIComponent(params.get("brand_id") || "")}` +
+      `&currency=${encodeURIComponent(params.get("currency") || "")}` +
+      `&availability=${encodeURIComponent(params.get("availability") || "")}` +
+      `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
       `&sortOrderError=${encodeURIComponent("Порядок должен быть больше 0.")}`
-  );
-}
+        );
+    }
 
   const categoryIds = params
     .getAll("category_ids")
