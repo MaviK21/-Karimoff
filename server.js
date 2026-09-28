@@ -1,5 +1,9 @@
+import dotenv from "dotenv";
+dotenv.config({ path: "karimoff-site/.env" });
+
 import { createServer } from "http";
 import { randomBytes } from "crypto";
+import nodemailer from "nodemailer";
 import db from "./lib/db.js";
 
 import pathModule from "path";
@@ -9,6 +13,17 @@ import { mkdirSync, writeFileSync } from "fs";
 
 const PORT = 3000;
 const ADMIN_PASSWORD = "12345";
+
+const mailTransporter =
+  nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT),
+    secure: process.env.SMTP_SECURE === "true",
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
 
 let adminToken = null;
 
@@ -1012,9 +1027,9 @@ function renderCharacteristicSelectionScript() {
         );
 
         updateCharacteristics();
-      })();
+      })()
     </script>
-  `;
+    `;
 }
 
 function getCharacteristics() {
@@ -1414,23 +1429,123 @@ if (
                     </a>
                   </li>
 
-                  <li>
-                    <a href="/orders">
-                      Заказы
-                    </a>
-                  </li>
+                   <li>
+                     <a href="/orders">
+                       Заказы
+                     </a>
+                   </li>
 
-                </ul>
+                   <li>
+                     <a href="/admin/settings">
+                       Настройки заявок
+                     </a>
+                   </li>
+
+                 </ul>
               `
             )
           );
-        }
+         }
 
 
          // ==================================================
-        // ХАРАКТЕРИСТИКИ — GET
-        // ТОЛЬКО АДМИН
-        // ==================================================
+         // НАСТРОЙКИ САЙТА — GET
+         // ТОЛЬКО АДМИН
+         // ==================================================
+
+         if (
+           req.method === "GET" &&
+           path === "/admin/settings"
+         ) {
+
+           if (!requireAdmin(req, res)) {
+             return;
+           }
+
+           const setting =
+             db.prepare(`
+               SELECT value
+               FROM site_settings
+               WHERE key = ?
+             `).get("orders_email");
+
+           return sendHtml(
+             res,
+             renderPage(
+               req,
+               "Настройки заявок",
+               `
+                 <h1>
+                   Настройки заявок
+                 </h1>
+
+                 <form
+                   method="POST"
+                   action="/admin/settings"
+                 >
+                   <p>
+                     <label>
+                       Рабочий email:
+                       <input
+                         type="email"
+                         name="orders_email"
+                         value="${escapeHtml(setting?.value || "")}" 
+                       >
+                     </label>
+                   </p>
+
+                   <button type="submit">
+                     Сохранить
+                   </button>
+                 </form>
+               `
+             )
+           );
+          }
+
+
+          // ==================================================
+          // НАСТРОЙКИ САЙТА — POST
+          // ТОЛЬКО АДМИН
+          // ==================================================
+
+          if (
+            req.method === "POST" &&
+            path === "/admin/settings"
+          ) {
+
+            if (!requireAdmin(req, res)) {
+              return;
+            }
+
+            const params =
+              await readBody(req);
+
+            const email =
+              params.get("orders_email")?.trim() || "";
+
+            db.prepare(`
+              INSERT INTO site_settings
+              (key, value)
+              VALUES (?, ?)
+              ON CONFLICT(key)
+              DO UPDATE SET value = excluded.value
+            `).run(
+              "orders_email",
+              email
+            );
+
+            return redirect(
+              res,
+              "/admin/settings"
+            );
+          }
+
+
+           // ==================================================
+          // ХАРАКТЕРИСТИКИ — GET
+          // ТОЛЬКО АДМИН
+          // ==================================================
 
         if (
           req.method === "GET" &&
@@ -2822,6 +2937,206 @@ searchSuggestions.addEventListener("click", (event) => {
     )
   );
 }
+// ==================================================
+// КУПИТЬ В 1 КЛИК — ФОРМА
+// ==================================================
+if (req.method === "GET" && path === "/buy-one-click") {
+  const productId = Number(url.searchParams.get("product_id"));
+
+  if (!Number.isInteger(productId) || productId < 1) {
+    return sendHtml(
+      res,
+      renderPage(
+        req,
+        "Ошибка",
+        `
+          <h1>Ошибка</h1>
+          <p>Не указан товар.</p>
+        `
+      ),
+      400
+    );
+  }
+
+  const product = db
+    .prepare(`
+      SELECT *
+      FROM products
+      WHERE id = ? AND deleted = 0
+    `)
+    .get(productId);
+
+  if (!product) {
+    return sendHtml(
+      res,
+      renderPage(
+        req,
+        "Товар не найден",
+        `
+          <h1>Товар не найден</h1>
+          <p>Выбранный товар больше не существует.</p>
+        `
+      ),
+      404
+    );
+  }
+
+  const oneClickToken =
+    randomBytes(32).toString("hex");
+
+  db.prepare(`
+    INSERT INTO one_click_tokens
+    (
+      token,
+      expires_at
+    )
+    VALUES (?, ?)
+  `).run(
+    oneClickToken,
+    Date.now() + 10 * 60 * 1000
+  );
+
+  const oneClickFormCookie =
+    parseCookies(req).one_click_form || "";
+
+  let oneClickForm = {
+    quantity: "1",
+    name: "",
+    phone: "",
+    comment: "",
+    agree: false,
+    error: ""
+  };
+
+  if (oneClickFormCookie) {
+    try {
+      const parsed = JSON.parse(oneClickFormCookie);
+
+      oneClickForm = {
+        ...oneClickForm,
+        ...parsed
+      };
+    } catch {
+      // Поврежденное временное состояние формы игнорируем.
+    }
+
+    res.setHeader(
+      "Set-Cookie",
+      "one_click_form=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/buy-one-click"
+    );
+  }
+
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      "Купить в 1 клик",
+      `
+         <h1>Купить в 1 клик</h1>
+
+         ${
+           oneClickForm.error
+             ? `<p style="color:red;">${escapeHtml(oneClickForm.error)}</p>`
+             : ""
+         }
+
+         <h2>
+          ${escapeHtml(product.name)}
+        </h2>
+
+        <form
+          method="POST"
+          action="/buy-one-click"
+        >
+           <input
+             type="hidden"
+             name="product_id"
+             value="${product.id}"
+           >
+
+           <input
+             type="hidden"
+             name="one_click_token"
+             value="${escapeHtml(oneClickToken)}"
+           >
+
+           <p>
+            <label>
+              Количество:
+              <input
+                type="number"
+                 name="quantity"
+                 value="${escapeHtml(String(oneClickForm.quantity))}"
+                 min="1"
+                max="99"
+                required
+              >
+            </label>
+          </p>
+
+          <p>
+            <label>
+              Имя:
+              <input
+                 type="text"
+                 name="name"
+                 value="${escapeHtml(oneClickForm.name)}"
+                 required
+              >
+            </label>
+          </p>
+
+          <p>
+            <label>
+              Телефон:
+              <input
+  type="tel"
+   name="phone"
+   value="${escapeHtml(oneClickForm.phone)}"
+   inputmode="tel"
+  autocomplete="tel"
+  required
+  oninput="this.value = this.value.replace(/[^0-9+() -]/g, '')"
+>
+            </label>
+          </p>
+
+          <p>
+            <label>
+              Комментарий:
+               <textarea
+                 name="comment"
+               >${escapeHtml(oneClickForm.comment)}</textarea>
+            </label>
+          </p>
+
+          <p>
+            <label>
+              <input
+                 type="checkbox"
+                 name="agree"
+                 value="1"
+                 ${oneClickForm.agree ? "checked" : ""}
+                 required
+              >
+              Согласен на обработку персональных данных
+            </label>
+          </p>
+
+          <button type="submit">
+            Купить в 1 клик
+          </button>
+        </form>
+
+        <p>
+          <a href="/product/${product.id}">
+            Вернуться к товару
+          </a>
+        </p>
+      `
+    )
+  );
+}
 
 // ==================================================
 // КАРТОЧКА ТОВАРА
@@ -2973,8 +3288,14 @@ if (
         </p>
 
         <p>
-<a href="/cart/add/${id}">
-              В корзину
+  <a href="/buy-one-click?product_id=${id}">
+    Купить в 1 клик
+  </a>
+</p>
+
+        <p>
+          <a href="/cart/add/${id}">
+            В корзину
           </a>
         </p>
 
@@ -2993,6 +3314,295 @@ if (
     )
   );
 }
+
+        // ==================================================
+        // КУПИТЬ В 1 КЛИК
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path === "/buy-one-click"
+        ) {
+
+           const params =
+             await readBody(req);
+
+           const oneClickToken =
+             params.get("one_click_token") || "";
+
+           const productId =
+            Number(
+              params.get("product_id")
+            );
+
+          const quantity =
+            Number(
+              params.get("quantity")
+            );
+
+          const name =
+            params.get("name")
+              ?.trim() || "";
+
+          const phone =
+            params.get("phone")
+              ?.trim() || "";
+
+          const comment =
+            params.get("comment")
+              ?.trim() || "";
+
+          const product =
+            db.prepare(`
+              SELECT *
+              FROM products
+              WHERE id = ?
+                AND deleted = 0
+            `).get(productId);
+
+          if (!product) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Товар не найден",
+                `
+                  <h1>
+                    Товар не найден
+                  </h1>
+
+                  <p>
+                    <a href="/catalog">
+                      Вернуться в каталог
+                    </a>
+                  </p>
+                `
+              ),
+              404
+            );
+          }
+
+          const phoneDigits =
+            phone.replace(/[^0-9]/g, "");
+
+          const validPhone =
+            (
+              phoneDigits.length === 11 &&
+              (
+                phoneDigits.startsWith("7") ||
+                phoneDigits.startsWith("8")
+              )
+            ) ||
+            (
+              phoneDigits.length === 12 &&
+              phoneDigits.startsWith("375")
+            );
+
+          if (
+            params.get("agree") !== "1" ||
+            !name ||
+            !validPhone ||
+            !Number.isInteger(quantity) ||
+            quantity < 1 ||
+            quantity > 99
+          ) {
+            let errorMessage =
+              "Проверьте данные формы.";
+
+            if (!name) {
+              errorMessage = "Укажите имя.";
+            } else if (!validPhone) {
+              errorMessage = "Укажите корректный номер телефона.";
+            } else if (
+              !Number.isInteger(quantity) ||
+              quantity < 1 ||
+              quantity > 99
+            ) {
+              errorMessage = "Количество должно быть от 1 до 99.";
+            } else if (params.get("agree") !== "1") {
+              errorMessage =
+                "Необходимо согласиться на обработку персональных данных.";
+            }
+
+            const formState = {
+              quantity: Number.isInteger(quantity) ? quantity : (params.get("quantity") || ""),
+              name,
+              phone,
+              comment,
+              agree: params.get("agree") === "1",
+              error: errorMessage
+            };
+
+            res.setHeader(
+  "Set-Cookie",
+  "one_click_form=" +
+    encodeURIComponent(JSON.stringify(formState)) +
+    "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/buy-one-click"
+);
+
+return redirect(
+  res,
+  "/buy-one-click?product_id=" + productId
+);
+          }
+
+          const tokenResult = db
+            .prepare(`
+              DELETE FROM one_click_tokens
+              WHERE token = ?
+                AND expires_at > ?
+            `)
+            .run(
+              oneClickToken,
+              Date.now()
+            );
+
+          if (tokenResult.changes !== 1) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Заявка уже отправлена или форма устарела.</h1>`
+              ),
+              400
+            );
+          }
+
+          const priceOnRequest =
+            product.price_on_request ? 1 : 0;
+
+          const sum =
+            priceOnRequest
+              ? 0
+              : product.price *
+                quantity *
+                (
+                  1 -
+                  (
+                    Number(product.discount_percent) || 0
+                  ) / 100
+                );
+
+          const result =
+            db.prepare(`
+              INSERT INTO orders
+              (
+                name,
+                phone,
+                address,
+                total,
+                currency,
+                created_at,
+                status,
+                comment
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              name,
+              phone,
+              "",
+              sum,
+              product.currency,
+              new Date().toISOString(),
+               "Новая",
+               comment
+            );
+
+          const orderId =
+            Number(
+              result.lastInsertRowid
+            );
+
+          db.prepare(`
+            INSERT INTO order_items
+            (
+              order_id,
+              product_id,
+              product_name,
+              price,
+              quantity,
+              sum,
+              price_on_request
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+           `).run(
+             orderId,
+             product.id,
+             product.name,
+             product.price,
+             quantity,
+             sum,
+             priceOnRequest
+           );
+
+           const ordersEmail =
+             db.prepare(`
+               SELECT value
+               FROM site_settings
+               WHERE key = ?
+             `).get("orders_email")?.value?.trim();
+
+           if (ordersEmail) {
+             try {
+               await mailTransporter.sendMail({
+                 from: process.env.SMTP_USER,
+                 to: ordersEmail,
+                 subject: `Новая заявка №${orderId}`,
+                 text: [
+                   `Номер заявки: №${orderId}`,
+                   "Тип: Заказ товара",
+                   `Имя: ${name}`,
+                   `Телефон: ${phone}`,
+                   `Товар: ${product.name}`,
+                   `Количество: ${quantity}`,
+                    `Сумма: ${product.price_on_request ? "По запросу" : `${sum} ${product.currency}`}`,
+                   `Комментарий: ${comment}`
+                 ].join("\n")
+               });
+             } catch (error) {
+               console.error(
+                 "Ошибка отправки email заявки:",
+                 error?.message || error
+               );
+             }
+           }
+
+           return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Быстрый заказ принят",
+              `
+                <h1>
+                  Спасибо за заявку!
+                </h1>
+
+                <p>
+                  Номер заявки:
+                  <strong>
+                    №${orderId}
+                  </strong>
+                </p>
+
+                <p>
+                  ${
+                    priceOnRequest
+                      ? "Стоимость уточняется менеджером."
+                      : `Сумма: <strong>${sum} ${escapeHtml(product.currency)}</strong>`
+                  }
+                </p>
+
+                <p>
+                  <a href="/catalog">
+                    Вернуться в каталог
+                  </a>
+                </p>
+              `
+            )
+          );
+        }
+
 
         // ==================================================
         // КОРЗИНА
@@ -3749,9 +4359,10 @@ if (isValidPhone(phone)) {
                 total,
                 currency,
                 created_at,
-                status
+                status,
+                comment
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               name,
               phone,
@@ -3759,7 +4370,9 @@ if (isValidPhone(phone)) {
               total,
               currency,
               new Date().toISOString(),
-              "Новый"
+              "Новый",
+              params.get("comment")
+                ?.trim() || ""
             );
 
 
@@ -4083,6 +4696,13 @@ ORDER BY id DESC
                   Адрес:
                   ${escapeHtml(
                     order.address
+                  )}
+                </p>
+
+                <p>
+                  Комментарий:
+                  ${escapeHtml(
+                    order.comment || "—"
                   )}
                 </p>
 
@@ -4652,6 +5272,14 @@ const isHit =
     params.get("sort_order") || 0
   );
 
+const categoryIds =
+            params
+              .getAll("category_ids")
+              .map(Number)
+              .filter(
+                Number.isInteger
+              );
+
   if (sortOrder < 1) {
   return redirect(
     res,
@@ -4670,13 +5298,7 @@ const isHit =
   );
 }
 
-          const categoryIds =
-            params
-              .getAll("category_ids")
-              .map(Number)
-              .filter(
-                Number.isInteger
-              );
+          
 
           const characteristicValues =
             getSubmittedCharacteristicValues(
@@ -4861,15 +5483,34 @@ const selectedIds =
           const categoryCharacteristicRows =
             getCategoryCharacteristicRows();
 
-          const valuesByCharacteristicId =
-            new Map(
-              getProductCharacteristics(id).map(
-                characteristic => [
-                  characteristic.id,
-                  characteristic.value || ""
-                ]
-              )
-            );
+          const productCharacteristics =
+  getProductCharacteristics(id);
+
+const valuesByCharacteristicId =
+  new Map(
+    categoryCharacteristicRows.map(
+      characteristic => {
+        const queryValue =
+          queryParams.get(
+            `characteristic_${characteristic.id}`
+          );
+
+        const existingCharacteristic =
+          productCharacteristics.find(
+            item =>
+              item.id ===
+              characteristic.id
+          );
+
+        return [
+          characteristic.id,
+          queryValue !== null
+            ? queryValue
+            : existingCharacteristic?.value || ""
+        ];
+      }
+    )
+  );
 
 
           let options =
@@ -4911,10 +5552,13 @@ const selectedIds =
   ).get("sortOrderError") || "";
 
   const priceValue =
-  queryParams.get("price") || "";
+  queryParams.get("price");
 
-  const discountValue =
-  queryParams.get("discount") || "";
+const discountValue =
+  queryParams.get("discount");
+
+  const sortOrderValue =
+  queryParams.get("sort_order");
 
   const unitValue =
   queryParams.get("unit");
@@ -4931,8 +5575,14 @@ const selectedIds =
   const availabilityValue =
   queryParams.get("availability");
 
-  const priceOnRequestValue =
-  queryParams.get("price_on_request") === "1";
+  const priceOnRequestParam =
+  queryParams.get("price_on_request");
+
+  const isNewParam =
+  queryParams.get("is_new");
+
+  const isHitParam =
+  queryParams.get("is_hit");
 
           return sendHtml(
             res,
@@ -4997,9 +5647,13 @@ const selectedIds =
                       name="price_on_request"
                       value="1"
                      ${
-  priceOnRequestValue || product.price_on_request
-    ? "checked"
-    : ""
+  priceOnRequestParam !== null
+    ? priceOnRequestParam === "1"
+      ? "checked"
+      : ""
+    : product.price_on_request
+      ? "checked"
+      : ""
 }
                     >
                   </p>
@@ -5290,7 +5944,15 @@ ${escapeHtml(brand.name)}
                        type="checkbox"
                        name="is_new"
                        value="1"
-                       ${product.is_new ? "checked" : ""}
+                       ${
+  isNewParam !== null
+    ? isNewParam === "1"
+      ? "checked"
+      : ""
+    : product.is_new
+      ? "checked"
+      : ""
+}
                      >
                      Новинка
                    </label>
@@ -5302,7 +5964,15 @@ ${escapeHtml(brand.name)}
       type="checkbox"
       name="is_hit"
       value="1"
-      ${product.is_hit ? "checked" : ""}
+${
+  isHitParam !== null
+    ? isHitParam === "1"
+      ? "checked"
+      : ""
+    : product.is_hit
+      ? "checked"
+      : ""
+}
     >
     Хит
   </label>
@@ -5314,7 +5984,7 @@ ${escapeHtml(brand.name)}
   <input
     type="number"
     name="sort_order"
-    value="${product.sort_order}"
+value="${sortOrderValue ?? product.sort_order}"
   >
 </p>
 
@@ -5454,6 +6124,26 @@ const isHit =
     params.get("sort_order") || 0
   );
 
+const categoryIds =
+  params
+    .getAll("category_ids")
+    .map(Number)
+    .filter(Number.isInteger);
+  
+  const characteristicParams =
+  getCharacteristicsForCategoryIds(
+    categoryIds
+  )
+    .map(characteristic => {
+      const value =
+        params.get(
+          `characteristic_${characteristic.id}`
+        ) || "";
+
+      return `&characteristic_${characteristic.id}=${encodeURIComponent(value)}`;
+    })
+    .join("");
+
 if (sortOrder < 1) {
   return redirect(
     res,
@@ -5467,15 +6157,14 @@ if (sortOrder < 1) {
       `&brand_id=${encodeURIComponent(params.get("brand_id") || "")}` +
       `&currency=${encodeURIComponent(params.get("currency") || "")}` +
       `&availability=${encodeURIComponent(params.get("availability") || "")}` +
+      `&sort_order=${encodeURIComponent(params.get("sort_order") || "")}` +
+      `&is_new=${params.get("is_new") === "1" ? "1" : "0"}` +
+      `&is_hit=${params.get("is_hit") === "1" ? "1" : "0"}` +
       `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+      `&${characteristicParams.substring(1)}` +
       `&sortOrderError=${encodeURIComponent("Порядок должен быть больше 0.")}`
         );
     }
-
-  const categoryIds = params
-    .getAll("category_ids")
-    .map(Number)
-    .filter(Boolean);
 
   const characteristicValues =
     getSubmittedCharacteristicValues(
