@@ -213,6 +213,7 @@ function renderMenu(req) {
         <a href="/">Главная</a> |
         <a href="/catalog">Каталог</a> |
         <a href="/about">О нас</a> |
+        <a href="/service-request">Услуги / аренда</a> |
         <a href="/cart">Корзина</a> |
         <a href="/admin">Админ-панель</a> |
         <a href="/orders">Заказы</a> |
@@ -230,6 +231,7 @@ function renderMenu(req) {
       <a href="/">Главная</a> |
       <a href="/catalog">Каталог</a> |
       <a href="/about">О нас</a> |
+      <a href="/service-request">Услуги / аренда</a> |
       <a href="/cart">Корзина</a> |
       <a href="/admin">Админ</a>
     </nav>
@@ -296,13 +298,23 @@ function parseMultipartBody(buffer, contentType) {
   const files = new Map();
 
   for (let part of parts) {
-    part = part.trim();
 
-    if (!part || part === "--") {
+    if (!part) {
       continue;
     }
 
-    if (part.endsWith("--")) {
+    // Финальный маркер --boundary-- после split даёт часть, начинающуюся с "--".
+    if (part.startsWith("--")) {
+      continue;
+    }
+
+    // Точные границы multipart-части: \r\n перед заголовками и \r\n после данных.
+    // trim() здесь недопустим: он отрезает пробельные байты от бинарных данных файлов.
+    if (part.startsWith("\r\n")) {
+      part = part.slice(2);
+    }
+
+    if (part.endsWith("\r\n")) {
       part = part.slice(0, -2);
     }
 
@@ -336,7 +348,7 @@ function parseMultipartBody(buffer, contentType) {
           /Content-Type:\s*([^\r\n]+)/i
         );
 
-      files.set(name, {
+      const file = {
         filename,
         contentType:
           contentTypeMatch
@@ -346,7 +358,13 @@ function parseMultipartBody(buffer, contentType) {
           contentText,
           "latin1"
         )
-      });
+      };
+
+      if (!files.has(name)) {
+        files.set(name, []);
+      }
+
+      files.get(name).push(file);
 
       continue;
     }
@@ -375,18 +393,22 @@ getAll(name) {
 },
 
     getFile(name) {
-      return files.get(name) || null;
+      return files.get(name)?.[0] || null;
+    },
+
+    getAllFiles(name) {
+      return files.get(name) || [];
     }
   };
 }
 
-function saveUploadedImage(file) {
+function saveUploadedImage(file, allowedTypesOverride) {
 
   if (!file || !file.filename || !file.data.length) {
     return "";
   }
 
-  const allowedTypes = {
+  const allowedTypes = allowedTypesOverride || {
     "image/jpeg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
@@ -439,6 +461,559 @@ function saveUploadedImage(file) {
   );
 
   return `/uploads/${filename}`;
+}
+
+// ======================================================
+// ФОРМА ЗАЯВКИ НА УСЛУГУ / АРЕНДУ ТЕХНИКИ
+// ======================================================
+
+function renderServiceRequestForm(values = {}, errors = {}) {
+
+  const fieldError = key =>
+    errors[key]
+      ? `<small style="display:block; color:red;">${escapeHtml(errors[key])}</small>`
+      : "";
+
+  return `
+    <h1>
+      Заявка на услугу / аренду техники
+    </h1>
+
+    <form
+      method="POST"
+      action="/service-request"
+      enctype="multipart/form-data"
+    >
+      <p>
+        <label>
+          Имя:
+          <input
+            type="text"
+            name="name"
+            value="${escapeHtml(values.name || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("name")}
+      </p>
+
+      <p>
+        <label>
+          Телефон:
+          <input
+            type="tel"
+            name="phone"
+            value="${escapeHtml(values.phone || "")}"
+            inputmode="tel"
+            autocomplete="tel"
+            required
+            oninput="this.value = this.value.replace(/[^0-9+() -]/g, '')"
+          >
+        </label>
+
+        ${fieldError("phone")}
+      </p>
+
+      <p>
+        <label>
+          Услуга / техника:
+          <input
+            type="text"
+            name="service_name"
+            placeholder="Например: аренда перфоратора или отделочные работы"
+            value="${escapeHtml(values.service_name || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("service_name")}
+      </p>
+
+      <p>
+        <label>
+          Дата:
+          <input
+            type="date"
+            name="request_date"
+            value="${escapeHtml(values.request_date || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("request_date")}
+      </p>
+
+      <p>
+        <label>
+          Желаемое время:
+          <input
+            type="time"
+            name="desired_time"
+            value="${escapeHtml(values.desired_time || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("desired_time")}
+      </p>
+
+      <p>
+        <label>
+          Адрес объекта:
+          <input
+            type="text"
+            name="address"
+            value="${escapeHtml(values.address || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("address")}
+      </p>
+
+      <p>
+        <label>
+          Длительность:
+          <input
+            type="text"
+            name="duration"
+            placeholder="Например: 3 дня или 2 часа"
+            value="${escapeHtml(values.duration || "")}"
+          >
+        </label>
+      </p>
+
+      <p>
+        <label>
+          Комментарий:
+          <textarea
+            name="comment"
+          >${escapeHtml(values.comment || "")}</textarea>
+        </label>
+      </p>
+
+      <p>
+        <label>
+          Фото объекта (можно несколько):
+          <input
+            type="file"
+            name="photos"
+            multiple
+            accept="image/jpeg,image/png,image/webp,image/heic"
+            id="service-request-photos"
+          >
+        </label>
+
+        <div
+          id="service-request-photo-previews"
+          style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;"
+        ></div>
+
+        <small
+          id="service-request-photos-error"
+          style="display:none; color:red;"
+        >
+          Можно прикрепить не более 10 фото.
+        </small>
+
+        ${fieldError("photos")}
+      </p>
+
+      <p>
+        <label>
+          <input
+            type="checkbox"
+            name="agree"
+            value="1"
+            ${values.agree ? "checked" : ""}
+            required
+          >
+          Согласен на обработку персональных данных
+        </label>
+
+        ${fieldError("agree")}
+      </p>
+
+      <button type="submit">
+        Отправить заявку
+      </button>
+    </form>
+
+    <script>
+      (
+        function () {
+          const photoInput =
+            document.getElementById(
+              "service-request-photos"
+            );
+
+          const previewsContainer =
+            document.getElementById(
+              "service-request-photo-previews"
+            );
+
+          if (
+            !photoInput ||
+            !previewsContainer
+          ) {
+            return;
+          }
+
+          let selectedFiles =
+            [];
+
+          const maxPhotos = 10;
+
+          const errorElement =
+            document.getElementById(
+              "service-request-photos-error"
+            );
+
+          function showError(
+            message
+          ) {
+            if (
+              !errorElement
+            ) {
+              return;
+            }
+
+            if (message) {
+              errorElement
+                .textContent =
+                  message;
+
+              errorElement
+                .style
+                .display =
+                  "block";
+            } else {
+              errorElement
+                .style
+                .display =
+                  "none";
+            }
+          }
+
+          function renderPreviews() {
+            previewsContainer
+              .innerHTML = "";
+
+            const dataTransfer =
+              new DataTransfer();
+
+            for (
+              let i = 0;
+              i < selectedFiles.length;
+              i++
+            ) {
+              const file =
+                selectedFiles[i];
+
+              dataTransfer
+                .items
+                .add(file);
+
+              const wrapper =
+                document
+                  .createElement(
+                    "div"
+                  );
+
+              wrapper
+                .style
+                .position =
+                  "relative";
+
+              const thumbnail =
+                document
+                  .createElement(
+                    "img"
+                  );
+
+              thumbnail
+                .src =
+                  URL
+                    .createObjectURL(
+                      file
+                    );
+
+              thumbnail
+                .style =
+                "width:80px; height:80px; object-fit:cover; border:1px solid #ccc; border-radius:4px;";
+
+              const removeButton =
+                document
+                  .createElement(
+                    "button"
+                  );
+
+              removeButton
+                .type =
+                  "button";
+
+              removeButton
+                .textContent =
+                  "✕";
+
+              removeButton
+                .title =
+                  "Удалить фото";
+
+              removeButton
+                .style =
+                "position:absolute; top:-6px; right:-6px; width:20px; height:20px; padding:0; border:none; border-radius:50%; background:#d9534f; color:#fff; cursor:pointer; font-size:12px; line-height:1;";
+
+              removeButton
+                .addEventListener(
+                  "click",
+                  function () {
+                    URL
+                      .revokeObjectURL(
+                        thumbnail
+                          .src
+                      );
+
+                    selectedFiles
+                      .splice(
+                        i,
+                        1
+                      );
+
+                    renderPreviews();
+                  }
+                );
+
+              wrapper
+                .appendChild(
+                  thumbnail
+                );
+
+              wrapper
+                .appendChild(
+                  removeButton
+                );
+
+              previewsContainer
+                .appendChild(
+                  wrapper
+                );
+            }
+
+            photoInput
+              .files =
+              dataTransfer
+                .files;
+          }
+
+          photoInput
+            .addEventListener(
+              "change",
+              function () {
+                const newFiles =
+                  Array
+                    .from(
+                      photoInput
+                        .files
+                    );
+
+                const remainingSlots =
+                  maxPhotos -
+                  selectedFiles.length;
+
+                if (
+                  newFiles.length >
+                  remainingSlots
+                ) {
+                  showError(
+                    "Можно прикрепить не более " +
+                    maxPhotos +
+                    " фото. Добавлено только " +
+                    Math.max(remainingSlots, 0) +
+                    " из выбранных " +
+                    newFiles.length +
+                    "."
+                  );
+                } else {
+                  showError(
+                    ""
+                  );
+                }
+
+                const filesToAdd =
+                  newFiles.slice(
+                    0,
+                    Math.max(
+                      remainingSlots,
+                      0
+                    )
+                  );
+
+                for (
+                  let i = 0;
+                  i < filesToAdd.length;
+                  i++
+                ) {
+                  selectedFiles
+                    .push(
+                      filesToAdd[i]
+                    );
+                }
+
+                renderPreviews();
+              }
+            );
+        }
+      )();
+    </script>
+  `;
+}
+
+// ======================================================
+// ФОРМА ЗАЯВКИ НА РЕМОНТ
+// ======================================================
+
+function renderRepairRequestForm(values = {}, errors = {}) {
+
+  const fieldError = key =>
+    errors[key]
+      ? `<small style="display:block; color:red;">${escapeHtml(errors[key])}</small>`
+      : "";
+
+  return `
+    <h1>
+      Заявка на ремонт
+    </h1>
+
+    <form
+      id="repair-form-1"
+      method="POST"
+      action="/repair-request"
+      enctype="multipart/form-data"
+    >
+      <p>
+        <label>
+          Имя:
+          <input
+            type="text"
+            name="name"
+            value="${escapeHtml(values.name || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("name")}
+      </p>
+
+      <p>
+        <label>
+          Телефон:
+          <input
+            type="tel"
+            name="phone"
+            value="${escapeHtml(values.phone || "")}"
+            inputmode="tel"
+            autocomplete="tel"
+            required
+            oninput="this.value = this.value.replace(/[^0-9+() -]/g, '')"
+          >
+        </label>
+
+        ${fieldError("phone")}
+      </p>
+
+      <p>
+        <label>
+          Тип оборудования:
+          <input
+            type="text"
+            name="equipment_type"
+            placeholder="Например: дрель, стиральная машина, телевизор"
+            value="${escapeHtml(values.equipment_type || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("equipment_type")}
+      </p>
+
+      <p>
+        <label>
+          Название оборудования:
+          <input
+            type="text"
+            name="equipment_name"
+            placeholder="Например: Bosch GSB 16 RE"
+            value="${escapeHtml(values.equipment_name || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("equipment_name")}
+      </p>
+
+      <p>
+        <label>
+          Производитель:
+          <input
+            type="text"
+            name="manufacturer"
+            placeholder="Например: Bosch"
+            value="${escapeHtml(values.manufacturer || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("manufacturer")}
+      </p>
+
+      <p>
+        <label>
+          Описание проблемы:
+          <textarea
+            name="problem"
+            required
+          >${escapeHtml(values.problem || "")}</textarea>
+        </label>
+
+        ${fieldError("problem")}
+      </p>
+
+      <p>
+        <label>
+          Фото (можно несколько):
+          <input
+            type="file"
+            name="photos"
+            multiple
+            accept="image/jpeg,image/png,image/webp,image/heic"
+          >
+        </label>
+
+        ${fieldError("photos")}
+      </p>
+
+      <p>
+        <label>
+          <input
+            type="checkbox"
+            name="agree"
+            value="1"
+            ${values.agree ? "checked" : ""}
+            required
+          >
+          Согласен на обработку персональных данных
+        </label>
+
+        ${fieldError("agree")}
+      </p>
+
+      <button type="submit">
+        Отправить заявку
+      </button>
+    </form>
+  `;
 }
 
 // ======================================================
@@ -1494,20 +2069,20 @@ if (
                      </label>
                    </p>
 
-                   <button type="submit">
-                     Сохранить
-                   </button>
-                 </form>
-               `
-             )
-           );
-          }
+                    <button type="submit">
+                      Сохранить
+                    </button>
+                  </form>
+                 `
+               )
+             );
+           }
 
 
-          // ==================================================
-          // НАСТРОЙКИ САЙТА — POST
-          // ТОЛЬКО АДМИН
-          // ==================================================
+           // ==================================================
+           // НАСТРОЙКИ САЙТА — POST
+           // ТОЛЬКО АДМИН
+           // ==================================================
 
           if (
             req.method === "POST" &&
@@ -3903,9 +4478,828 @@ return redirect(
         }
 
 
-        // ==================================================
-        // ОФОРМЛЕНИЕ ЗАКАЗА — GET
-        // ==================================================
+         // ==================================================
+         // ЗАЯВКА НА РЕМОНТ — GET
+         // ==================================================
+
+         if (
+           req.method === "GET" &&
+           path === "/repair-request"
+         ) {
+
+           return sendHtml(
+             res,
+             renderPage(
+               req,
+               "Заявка на ремонт",
+               renderRepairRequestForm()
+             )
+           );
+         }
+
+         // ==================================================
+         // ЗАЯВКА НА РЕМОНТ — POST
+         // ==================================================
+
+         if (
+           req.method === "POST" &&
+           path === "/repair-request"
+         ) {
+
+           const contentType =
+             req.headers["content-type"] || "";
+
+           const rawBody =
+             await readRawBody(req);
+
+           const params =
+             parseMultipartBody(
+               rawBody,
+               contentType
+             );
+
+           const name =
+             params.get("name")
+               ?.trim() || "";
+
+           const phone =
+             params.get("phone")
+               ?.trim() || "";
+
+           const equipmentType =
+             params.get("equipment_type")
+               ?.trim() || "";
+
+           const equipmentName =
+             params.get("equipment_name")
+               ?.trim() || "";
+
+           const manufacturer =
+             params.get("manufacturer")
+               ?.trim() || "";
+
+           const problem =
+             params.get("problem")
+               ?.trim() || "";
+
+           const phoneDigits =
+             phone.replace(/[^0-9]/g, "");
+
+           const validPhone =
+             (
+               phoneDigits.length === 11 &&
+               (
+                 phoneDigits.startsWith("7") ||
+                 phoneDigits.startsWith("8")
+               )
+             ) ||
+             (
+               phoneDigits.length === 12 &&
+               phoneDigits.startsWith("375")
+             );
+
+           const formValues = {
+             name,
+             phone,
+             equipment_type: equipmentType,
+             equipment_name: equipmentName,
+             manufacturer,
+             problem,
+             agree: params.get("agree") === "1"
+           };
+
+           const formErrors = {};
+
+           if (!name) {
+             formErrors.name = "Укажите имя.";
+           }
+
+           if (!validPhone) {
+             formErrors.phone = "Укажите корректный номер телефона.";
+           }
+
+           if (!equipmentType) {
+             formErrors.equipment_type = "Укажите тип оборудования.";
+           }
+
+           if (!equipmentName) {
+             formErrors.equipment_name = "Укажите название оборудования.";
+           }
+
+           if (!manufacturer) {
+             formErrors.manufacturer = "Укажите производителя.";
+           }
+
+           if (!problem) {
+             formErrors.problem = "Опишите проблему.";
+           }
+
+           if (params.get("agree") !== "1") {
+             formErrors.agree = "Необходимо согласиться на обработку персональных данных.";
+           }
+
+           if (
+             Object.keys(formErrors).length > 0
+           ) {
+             return sendHtml(
+               res,
+               renderPage(
+                 req,
+                 "Заявка на ремонт",
+                 renderRepairRequestForm(
+                   formValues,
+                   formErrors
+                 )
+               )
+             );
+           }
+
+            let photoPaths = [];
+
+            const photoFiles =
+              params.getAllFiles("photos");
+
+            if (photoFiles.length > 10) {
+              formErrors.photos = "Можно прикрепить не более 10 фото.";
+
+              return sendHtml(
+                res,
+                renderPage(
+                  req,
+                  "Заявка на ремонт",
+                  renderRepairRequestForm(
+                    formValues,
+                    formErrors
+                  )
+                )
+              );
+            }
+
+            // Браузеры часто не знают MIME-тип HEIC и отправляют application/octet-stream.
+            // Определяем тип по расширению файла, чтобы фото не терялись.
+            const photoFilesWithFallbackType =
+              photoFiles.map(photoFile => {
+                if (
+                  photoFile.contentType &&
+                  photoFile.contentType !== "application/octet-stream"
+                ) {
+                  return photoFile;
+                }
+
+                const lowerName =
+                  (photoFile.filename || "")
+                    .toLowerCase();
+
+                if (
+                  lowerName.endsWith(".jpg") ||
+                  lowerName.endsWith(".jpeg")
+                ) {
+                  return { ...photoFile, contentType: "image/jpeg" };
+                }
+
+                if (lowerName.endsWith(".png")) {
+                  return { ...photoFile, contentType: "image/png" };
+                }
+
+                if (lowerName.endsWith(".webp")) {
+                  return { ...photoFile, contentType: "image/webp" };
+                }
+
+                if (
+                  lowerName.endsWith(".heic") ||
+                  lowerName.endsWith(".heif")
+                ) {
+                  return { ...photoFile, contentType: "image/heic" };
+                }
+
+                return photoFile;
+              });
+
+            if (photoFilesWithFallbackType.length > 0) {
+              try {
+                photoPaths = photoFilesWithFallbackType.map(
+                  photoFile =>
+                    saveUploadedImage(
+                      photoFile,
+                      {
+                        "image/jpeg": ".jpg",
+                        "image/png": ".png",
+                        "image/webp": ".webp",
+                        "image/heic": ".heic",
+                        "image/heic-sequence": ".heic"
+                      }
+                    )
+                ).filter(Boolean);
+              } catch (uploadError) {
+                formErrors.photos =
+                  uploadError?.message ||
+                  "Не удалось загрузить фото. Разрешены форматы JPG, JPEG, PNG, WEBP, HEIC, размер — до 10 МБ.";
+
+                return sendHtml(
+                  res,
+                  renderPage(
+                    req,
+                    "Заявка на ремонт",
+                    renderRepairRequestForm(
+                      formValues,
+                      formErrors
+                    )
+                  )
+                );
+              }
+            }
+
+            const result =
+              db.prepare(`
+                INSERT INTO orders
+                (
+                  name,
+                  phone,
+                  address,
+                  total,
+                  currency,
+                  created_at,
+                  status,
+                  comment,
+                  type,
+                  equipment_type,
+                  equipment_name,
+                  manufacturer,
+                  problem,
+                  photos
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(
+                name,
+                phone,
+                "",
+                0,
+                "BYN",
+                new Date().toISOString(),
+                "Новая",
+                "",
+                "Ремонт",
+                equipmentType,
+                equipmentName,
+                manufacturer,
+                problem,
+                photoPaths.join(",")
+              );
+
+            const orderId =
+              Number(
+                result.lastInsertRowid
+              );
+
+            const ordersEmail =
+              db.prepare(`
+                SELECT value
+                FROM site_settings
+                WHERE key = ?
+              `).get("orders_email")?.value?.trim();
+
+            if (ordersEmail) {
+              try {
+                const mailTextLines = [
+                  `Номер заявки: №${orderId}`,
+                  "Тип: Ремонт",
+                  `Имя: ${name}`,
+                  `Телефон: ${phone}`,
+                  `Тип оборудования: ${equipmentType}`,
+                  `Название оборудования: ${equipmentName}`,
+                  `Производитель: ${manufacturer}`,
+                  `Описание проблемы: ${problem}`
+                ];
+
+                const mailAttachments = [];
+
+                let mailHtml =
+                  mailTextLines
+                    .map(line => `<p>${escapeHtml(line)}</p>`)
+                    .join("");
+
+                if (photoPaths.length > 0) {
+                  for (
+                    let i = 0;
+                    i < photoPaths.length;
+                    i++
+                  ) {
+                    const photoPath =
+                      photoPaths[i];
+
+                    const cid =
+                      `repair-photo-${orderId}-${i}`;
+
+                    mailAttachments.push({
+                      filename:
+                        `photo-${i + 1}` +
+                        pathModule.extname(photoPath),
+                      path:
+                        "." + photoPath,
+                      cid
+                    });
+
+                    mailHtml +=
+                      `<img src="cid:${cid}" alt="Фото ${i + 1}" style="max-width:300px; max-height:300px; margin:4px; border:1px solid #ccc;">`;
+                  }
+                } else {
+                  mailTextLines.push("Фото: нет");
+
+                  mailHtml +=
+                    "<p>Фото: нет</p>";
+                }
+
+                await mailTransporter.sendMail({
+                  from: process.env.SMTP_USER,
+                  to: ordersEmail,
+                  subject: `Новая заявка №${orderId}`,
+                  text:
+                    mailTextLines.join("\n"),
+                  html: mailHtml,
+                  attachments:
+                    mailAttachments
+                });
+              } catch (emailError) {
+                console.error(
+                  "Ошибка отправки email заявки:",
+                  emailError?.message || emailError
+                );
+              }
+            }
+
+            return sendHtml(
+             res,
+             renderPage(
+               req,
+               "Заявка принята",
+               `
+                 <h1>
+                   Спасибо за заявку!
+                 </h1>
+
+                 <p>
+                   Номер заявки:
+                   <strong>
+                     №${orderId}
+                   </strong>
+                 </p>
+
+                 <p>
+                   Мы свяжемся с вами для подтверждения.
+                 </p>
+
+                 <p>
+                   <a href="/repair-request">
+                     Отправить ещё одну заявку
+                   </a>
+                 </p>
+               `
+             )
+           );
+         }
+
+         // ==================================================
+         // ЗАЯВКА НА УСЛУГУ / АРЕНДУ ТЕХНИКИ — GET
+         // ==================================================
+
+         if (
+           req.method === "GET" &&
+           path === "/service-request"
+         ) {
+
+           return sendHtml(
+             res,
+             renderPage(
+               req,
+               "Заявка на услугу / аренду",
+               renderServiceRequestForm()
+             )
+           );
+         }
+
+         // ==================================================
+         // ЗАЯВКА НА УСЛУГУ / АРЕНДУ ТЕХНИКИ — POST
+         // ==================================================
+
+         if (
+           req.method === "POST" &&
+           path === "/service-request"
+         ) {
+
+           const contentType =
+             req.headers["content-type"] || "";
+
+           const rawBody =
+             await readRawBody(req);
+
+           const params =
+             parseMultipartBody(
+               rawBody,
+               contentType
+             );
+
+           const name =
+             params.get("name")
+               ?.trim() || "";
+
+           const phone =
+             params.get("phone")
+               ?.trim() || "";
+
+           const serviceName =
+             params.get("service_name")
+               ?.trim() || "";
+
+           const requestDate =
+             params.get("request_date")
+               ?.trim() || "";
+
+           const desiredTime =
+             params.get("desired_time")
+               ?.trim() || "";
+
+           const address =
+             params.get("address")
+               ?.trim() || "";
+
+           const duration =
+             params.get("duration")
+               ?.trim() || "";
+
+           const comment =
+             params.get("comment")
+               ?.trim() || "";
+
+           const phoneDigits =
+             phone.replace(/[^0-9]/g, "");
+
+           const validPhone =
+             (
+               phoneDigits.length === 11 &&
+               (
+                 phoneDigits.startsWith("7") ||
+                 phoneDigits.startsWith("8")
+               )
+             ) ||
+             (
+               phoneDigits.length === 12 &&
+               phoneDigits.startsWith("375")
+             );
+
+           const formValues = {
+             name,
+             phone,
+             service_name: serviceName,
+             request_date: requestDate,
+             desired_time: desiredTime,
+             address,
+             duration,
+             comment,
+             agree: params.get("agree") === "1"
+           };
+
+           const formErrors = {};
+
+           if (!name) {
+             formErrors.name = "Укажите имя.";
+           }
+
+           if (!validPhone) {
+             formErrors.phone = "Укажите корректный номер телефона.";
+           }
+
+           if (!serviceName) {
+             formErrors.service_name = "Укажите услугу или технику.";
+           }
+
+            if (!requestDate) {
+              formErrors.request_date = "Укажите дату.";
+            } else {
+              const datePattern =
+                /^\d{4}-\d{2}-\d{2}$/;
+
+              if (!datePattern.test(requestDate)) {
+                formErrors.request_date = "Укажите корректную дату.";
+              } else {
+                const requestedDate =
+                  new Date(
+                    `${requestDate}T00:00:00`
+                  );
+
+                const today =
+                  new Date();
+
+                today.setHours(
+                  0,
+                  0,
+                  0,
+                  0
+                );
+
+                const maxDate =
+                  new Date(
+                    today
+                  );
+
+                maxDate.setFullYear(
+                  maxDate.getFullYear() + 10
+                );
+
+                if (
+                  Number.isNaN(
+                    requestedDate.getTime()
+                  )
+                ) {
+                  formErrors.request_date = "Укажите корректную дату.";
+                } else if (
+                  requestedDate < today
+                ) {
+                  formErrors.request_date = "Дата не может быть раньше сегодняшней.";
+                } else if (
+                  requestedDate > maxDate
+                ) {
+                  formErrors.request_date = "Дата не может быть позже, чем через 10 лет.";
+                }
+              }
+            }
+
+           if (!desiredTime) {
+             formErrors.desired_time = "Укажите желаемое время.";
+           }
+
+           if (!address) {
+             formErrors.address = "Укажите адрес объекта.";
+           }
+
+           if (params.get("agree") !== "1") {
+             formErrors.agree = "Необходимо согласиться на обработку персональных данных.";
+           }
+
+           if (
+             Object.keys(formErrors).length > 0
+           ) {
+             return sendHtml(
+               res,
+               renderPage(
+                 req,
+                 "Заявка на услугу / аренду",
+                 renderServiceRequestForm(
+                   formValues,
+                   formErrors
+                 )
+               )
+             );
+           }
+
+             let photoPaths = [];
+ 
+             const photoFiles =
+               params.getAllFiles("photos");
+
+             if (photoFiles.length > 10) {
+               formErrors.photos = "Можно прикрепить не более 10 фото.";
+
+               return sendHtml(
+                 res,
+                 renderPage(
+                   req,
+                   "Заявка на услугу / аренду",
+                   renderServiceRequestForm(
+                     formValues,
+                     formErrors
+                   )
+                 )
+               );
+             }
+
+            // Браузеры часто не знают MIME-тип HEIC и отправляют application/octet-stream.
+            // Определяем тип по расширению файла, чтобы фото не терялись.
+            const photoFilesWithFallbackType =
+              photoFiles.map(photoFile => {
+                if (
+                  photoFile.contentType &&
+                  photoFile.contentType !== "application/octet-stream"
+                ) {
+                  return photoFile;
+                }
+
+                const lowerName =
+                  (photoFile.filename || "")
+                    .toLowerCase();
+
+                if (
+                  lowerName.endsWith(".jpg") ||
+                  lowerName.endsWith(".jpeg")
+                ) {
+                  return { ...photoFile, contentType: "image/jpeg" };
+                }
+
+                if (lowerName.endsWith(".png")) {
+                  return { ...photoFile, contentType: "image/png" };
+                }
+
+                if (lowerName.endsWith(".webp")) {
+                  return { ...photoFile, contentType: "image/webp" };
+                }
+
+                if (
+                  lowerName.endsWith(".heic") ||
+                  lowerName.endsWith(".heif")
+                ) {
+                  return { ...photoFile, contentType: "image/heic" };
+                }
+
+                return photoFile;
+              });
+ 
+            if (photoFilesWithFallbackType.length > 0) {
+              try {
+                photoPaths = photoFilesWithFallbackType.map(
+                  photoFile =>
+                    saveUploadedImage(
+                      photoFile,
+                      {
+                        "image/jpeg": ".jpg",
+                        "image/png": ".png",
+                        "image/webp": ".webp",
+                        "image/heic": ".heic",
+                        "image/heic-sequence": ".heic"
+                      }
+                    )
+                ).filter(Boolean);
+              } catch (uploadError) {
+                formErrors.photos =
+                  uploadError?.message ||
+                  "Не удалось загрузить фото. Разрешены форматы JPG, JPEG, PNG, WEBP, HEIC, размер — до 10 МБ.";
+
+                return sendHtml(
+                  res,
+                  renderPage(
+                    req,
+                    "Заявка на услугу / аренду",
+                    renderServiceRequestForm(
+                      formValues,
+                      formErrors
+                    )
+                  )
+                );
+              }
+            }
+
+           const result =
+             db.prepare(`
+               INSERT INTO orders
+               (
+                 name,
+                 phone,
+                 address,
+                 total,
+                 currency,
+                 created_at,
+                 status,
+                 comment,
+                 type,
+                 service_name,
+                 request_date,
+                 desired_time,
+                 duration,
+                 photos
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             `).run(
+               name,
+               phone,
+               address,
+               0,
+               "BYN",
+               new Date().toISOString(),
+               "Новая",
+               comment,
+               "Услуга",
+               serviceName,
+               requestDate,
+               desiredTime,
+               duration,
+               photoPaths.join(",")
+             );
+
+            const orderId =
+              Number(
+                result.lastInsertRowid
+              );
+
+            const ordersEmail =
+              db.prepare(`
+                SELECT value
+                FROM site_settings
+                WHERE key = ?
+              `).get("orders_email")?.value?.trim();
+
+             if (ordersEmail) {
+              try {
+                const mailTextLines = [
+                  `Номер заявки: №${orderId}`,
+                  "Тип: Услуга",
+                  `Имя: ${name}`,
+                  `Телефон: ${phone}`,
+                  `Услуга/техника: ${serviceName}`,
+                  `Дата: ${requestDate}`,
+                  `Желаемое время: ${desiredTime}`,
+                  `Адрес объекта: ${address}`,
+                  `Длительность: ${duration || "не указана"}`,
+                  `Комментарий: ${comment || "нет"}`
+                ];
+
+                const mailAttachments = [];
+
+                let mailHtml =
+                  mailTextLines
+                    .map(line => `<p>${escapeHtml(line)}</p>`)
+                    .join("");
+
+                if (photoPaths.length > 0) {
+                  for (
+                    let i = 0;
+                    i < photoPaths.length;
+                    i++
+                  ) {
+                    const photoPath =
+                      photoPaths[i];
+
+                    const cid =
+                      `service-photo-${orderId}-${i}`;
+
+                    mailAttachments.push({
+                      filename:
+                        `photo-${i + 1}` +
+                        pathModule.extname(photoPath),
+                      path:
+                        "." + photoPath,
+                      cid
+                    });
+
+                    mailHtml +=
+                      `<img src="cid:${cid}" alt="Фото ${i + 1}" style="max-width:300px; max-height:300px; margin:4px; border:1px solid #ccc;">`;
+                  }
+                } else {
+                  mailTextLines.push("Фото: нет");
+
+                  mailHtml +=
+                    "<p>Фото: нет</p>";
+                }
+
+                await mailTransporter.sendMail({
+                  from: process.env.SMTP_USER,
+                  to: ordersEmail,
+                  subject: `Новая заявка №${orderId}`,
+                  text:
+                    mailTextLines.join("\n"),
+                  html: mailHtml,
+                  attachments:
+                    mailAttachments
+                });
+              } catch (emailError) {
+                console.error(
+                  "Ошибка отправки email заявки:",
+                  emailError?.message || emailError
+                );
+              }
+            }
+
+            return sendHtml(
+             res,
+             renderPage(
+               req,
+               "Заявка принята",
+               `
+                 <h1>
+                   Спасибо за заявку!
+                 </h1>
+
+                 <p>
+                   Номер заявки:
+                   <strong>
+                     №${orderId}
+                   </strong>
+                 </p>
+
+                 <p>
+                   Мы свяжемся с вами для подтверждения.
+                 </p>
+
+                 <p>
+                   <a href="/service-request">
+                     Отправить ещё одну заявку
+                   </a>
+                 </p>
+               `
+             )
+           );
+         }
+
+         // ==================================================
+         // ОФОРМЛЕНИЕ ЗАКАЗА — GET
+         // ==================================================
 
         if (
           req.method === "GET" &&
@@ -3939,6 +5333,54 @@ return redirect(
             const hasPriceOnRequest =
   items.some(item => item.price_on_request);
 
+          const checkoutToken =
+            randomBytes(32).toString("hex");
+
+          db.prepare(`
+            INSERT INTO one_click_tokens
+            (
+              token,
+              expires_at
+            )
+            VALUES (?, ?)
+          `).run(
+            checkoutToken,
+            Date.now() + 10 * 60 * 1000
+          );
+
+          const checkoutFormCookie =
+            parseCookies(req).checkout_form || "";
+
+          let checkoutForm = {
+            name: "",
+            phone: "",
+            email: "",
+            address: "",
+            comment: "",
+            payment: "cash",
+            delivery: "delivery",
+            agree: false,
+            error: ""
+          };
+
+          if (checkoutFormCookie) {
+            try {
+              const parsed = JSON.parse(checkoutFormCookie);
+
+              checkoutForm = {
+                ...checkoutForm,
+                ...parsed
+              };
+            } catch {
+              // Поврежденное временное состояние формы игнорируем.
+            }
+
+            res.setHeader(
+              "Set-Cookie",
+              "checkout_form=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/checkout"
+            );
+          }
+
           return sendHtml(
             res,
             renderPage(
@@ -3948,6 +5390,12 @@ return redirect(
                 <h1>
                   Оформление заказа
                 </h1>
+
+                ${
+                  checkoutForm.error
+                    ? `<p style="color:red;">${escapeHtml(checkoutForm.error)}</p>`
+                    : ""
+                }
 
                 <p>
                   Сумма заказа:
@@ -3964,12 +5412,20 @@ return redirect(
                   method="POST"
                   action="/checkout"
                    novalidate
-                >
+                 >
+
+                   <input
+                     type="hidden"
+                     name="checkout_token"
+                     value="${escapeHtml(checkoutToken)}"
+                   >
+
 
                   <p>
                     Имя:
                     <input
                       name="name"
+                      value="${escapeHtml(checkoutForm.name)}"
                       required
                     >
 
@@ -3986,6 +5442,7 @@ return redirect(
                     <input
                       type="tel"
                       name="phone"
+                      value="${escapeHtml(checkoutForm.phone)}"
                       inputmode="tel"
                       pattern=".{7,}"
                       required
@@ -4003,6 +5460,7 @@ return redirect(
                     Адрес:
                     <input
                       name="address"
+                      value="${escapeHtml(checkoutForm.address)}"
                     >
 
                     <small
@@ -4018,6 +5476,7 @@ return redirect(
                     <input
                       type="email"
                       name="email"
+                      value="${escapeHtml(checkoutForm.email)}"
                     >
 
                     <small
@@ -4033,7 +5492,7 @@ return redirect(
                     <br>
                     <textarea
                       name="comment"
-                    ></textarea>
+                    >${escapeHtml(checkoutForm.comment)}</textarea>
                   </p>
 
                   <p>
@@ -4043,15 +5502,24 @@ return redirect(
                       name="payment"
                       required
                     >
-                      <option value="cash">
+                      <option
+                        value="cash"
+                        ${checkoutForm.payment === "cash" ? "selected" : ""}
+                      >
                         Наличные
                       </option>
 
-                      <option value="card">
+                      <option
+                        value="card"
+                        ${checkoutForm.payment === "card" ? "selected" : ""}
+                      >
                         Карта при получении
                       </option>
 
-                      <option value="installment">
+                      <option
+                        value="installment"
+                        ${checkoutForm.payment === "installment" ? "selected" : ""}
+                      >
                         Рассрочка
                       </option>
                     </select>
@@ -4064,11 +5532,17 @@ return redirect(
                       name="delivery"
                       required
                     >
-                      <option value="delivery">
+                      <option
+                        value="delivery"
+                        ${checkoutForm.delivery === "delivery" ? "selected" : ""}
+                      >
                         Доставка
                       </option>
 
-                      <option value="pickup">
+                      <option
+                        value="pickup"
+                        ${checkoutForm.delivery === "pickup" ? "selected" : ""}
+                      >
                         Самовывоз
                       </option>
                     </select>
@@ -4081,6 +5555,7 @@ return redirect(
                         type="checkbox"
                         name="agree"
                         value="1"
+                        ${checkoutForm.agree ? "checked" : ""}
                         required
                       >
 
@@ -4255,35 +5730,37 @@ if (isValidPhone(phone)) {
           const params =
             await readBody(req);
 
+          const checkoutToken =
+            params.get("checkout_token") || "";
+
 
           if (
             params.get("agree") !==
             "1"
           ) {
 
-            return sendHtml(
+            const formState = {
+              name: params.get("name")?.trim() || "",
+              phone: params.get("phone")?.trim() || "",
+              email: params.get("email")?.trim() || "",
+              address: params.get("address")?.trim() || "",
+              comment: params.get("comment")?.trim() || "",
+              payment: params.get("payment") || "cash",
+              delivery: params.get("delivery") || "delivery",
+              agree: false,
+              error: "Необходимо согласиться на обработку персональных данных."
+            };
+
+            res.setHeader(
+              "Set-Cookie",
+              "checkout_form=" +
+                encodeURIComponent(JSON.stringify(formState)) +
+                "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/checkout"
+            );
+
+            return redirect(
               res,
-              renderPage(
-                req,
-                "Ошибка",
-                `
-                  <h1>
-                    Ошибка
-                  </h1>
-
-                  <p>
-                    Необходимо согласиться
-                    на обработку данных.
-                  </p>
-
-                  <p>
-                    <a href="/checkout">
-                      Вернуться
-                    </a>
-                  </p>
-                `
-              ),
-              400
+              "/checkout"
             );
           }
 
@@ -4333,15 +5810,76 @@ if (isValidPhone(phone)) {
              params.get("address")
                ?.trim() || "";
 
-          if (
-   !name ||
-   !validPhone ||
-   (
-     params.get("delivery") === "delivery" &&
-     !address
-   )
- ) {
+           const email =
+             params.get("email")
+               ?.trim() || "";
 
+           const validEmail =
+             email === "" ||
+             /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+           if (
+    !name ||
+    !validPhone ||
+    !validEmail ||
+    (
+      params.get("delivery") === "delivery" &&
+      !address
+    )
+  ) {
+
+            let errorMessage =
+              "Заполните обязательные поля.";
+
+            if (!validPhone) {
+              errorMessage = "Укажите корректный номер телефона.";
+            } else if (!validEmail) {
+              errorMessage = "Укажите корректный email.";
+            } else if (
+              params.get("delivery") === "delivery" &&
+              !address
+            ) {
+              errorMessage = "Укажите адрес доставки.";
+            }
+
+            const formState = {
+              name,
+              phone,
+              email,
+              address,
+              comment: params.get("comment")?.trim() || "",
+              payment: params.get("payment") || "cash",
+              delivery: params.get("delivery") || "delivery",
+              agree: params.get("agree") === "1",
+              error: errorMessage
+            };
+
+           res.setHeader(
+             "Set-Cookie",
+             "checkout_form=" +
+               encodeURIComponent(JSON.stringify(formState)) +
+               "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/checkout"
+           );
+
+           return redirect(
+             res,
+             "/checkout"
+           );
+          }
+
+
+          const tokenResult = db
+            .prepare(`
+              DELETE FROM one_click_tokens
+              WHERE token = ?
+                AND expires_at > ?
+            `)
+            .run(
+              checkoutToken,
+              Date.now()
+            );
+
+          if (tokenResult.changes !== 1) {
             return sendHtml(
               res,
               renderPage(
@@ -4349,9 +5887,18 @@ if (isValidPhone(phone)) {
                 "Ошибка",
                 `
                   <h1>
-                    Заполните
-                    обязательные поля.
+                    Заказ уже отправлен или форма устарела.
                   </h1>
+
+                  <p>
+                    Обновите страницу оформления и попробуйте снова.
+                  </p>
+
+                  <p>
+                    <a href="/cart">
+                      Вернуться в корзину
+                    </a>
+                  </p>
                 `
               ),
               400
@@ -4937,6 +6484,122 @@ if (isValidPhone(phone)) {
                       order.type || ""
                     )}
                   </p>
+
+                  ${
+                    order.type === "Услуга"
+                      ? `
+                        <p>
+                          Услуга/техника:
+                          ${escapeHtml(order.service_name || "—")}
+                        </p>
+
+                        <p>
+                          Дата:
+                          ${escapeHtml(order.request_date || "—")}
+                        </p>
+
+                        <p>
+                          Желаемое время:
+                          ${escapeHtml(order.desired_time || "—")}
+                        </p>
+
+                        <p>
+                          Длительность:
+                          ${escapeHtml(order.duration || "—")}
+                        </p>
+
+                        ${
+                          order.photos
+                            ? `
+                              <p>
+                                Фото:
+                              </p>
+
+                              <p>
+                                ${
+                                  order.photos
+                                    .split(",")
+                                    .map(photoPath => photoPath.trim())
+                                    .filter(Boolean)
+                                    .map(photoPath => `
+                                      <a
+                                        href="${escapeHtml(photoPath)}"
+                                        target="_blank"
+                                      >
+                                        <img
+                                          src="${escapeHtml(photoPath)}"
+                                          alt="Фото заявки №${orderId}"
+                                          style="max-width:200px; max-height:200px; margin:4px; border:1px solid #ccc;"
+                                        >
+                                      </a>
+                                    `)
+                                    .join("")
+                                }
+                              </p>
+                            `
+                            : ""
+                        }
+                      `
+                      : ""
+                  }
+
+                  ${
+                    order.type === "Ремонт"
+                      ? `
+                        <p>
+                          Тип оборудования:
+                          ${escapeHtml(order.equipment_type || "—")}
+                        </p>
+
+                        <p>
+                          Название оборудования:
+                          ${escapeHtml(order.equipment_name || "—")}
+                        </p>
+
+                        <p>
+                          Производитель:
+                          ${escapeHtml(order.manufacturer || "—")}
+                        </p>
+
+                        <p>
+                          Описание проблемы:
+                          ${escapeHtml(order.problem || "—")}
+                        </p>
+
+                        ${
+                          order.photos
+                            ? `
+                              <p>
+                                Фото:
+                              </p>
+
+                              <p>
+                                ${
+                                  order.photos
+                                    .split(",")
+                                    .map(photoPath => photoPath.trim())
+                                    .filter(Boolean)
+                                    .map(photoPath => `
+                                      <a
+                                        href="${escapeHtml(photoPath)}"
+                                        target="_blank"
+                                      >
+                                        <img
+                                          src="${escapeHtml(photoPath)}"
+                                          alt="Фото заявки №${orderId}"
+                                          style="max-width:200px; max-height:200px; margin:4px; border:1px solid #ccc;"
+                                        >
+                                      </a>
+                                    `)
+                                    .join("")
+                                }
+                              </p>
+                            `
+                            : ""
+                        }
+                      `
+                      : ""
+                  }
 
                   <form
                     method="POST"
