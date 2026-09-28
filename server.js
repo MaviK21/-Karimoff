@@ -3495,9 +3495,10 @@ return redirect(
                 currency,
                 created_at,
                 status,
-                comment
+                comment,
+                type
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               name,
               phone,
@@ -3506,7 +3507,8 @@ return redirect(
               product.currency,
               new Date().toISOString(),
                "Новая",
-               comment
+               comment,
+               "Заказ товара"
             );
 
           const orderId =
@@ -4376,9 +4378,10 @@ if (isValidPhone(phone)) {
                 currency,
                 created_at,
                 status,
-                comment
+                comment,
+                type
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
               name,
               phone,
@@ -4388,7 +4391,8 @@ if (isValidPhone(phone)) {
               new Date().toISOString(),
               "Новый",
               params.get("comment")
-                ?.trim() || ""
+                ?.trim() || "",
+              "Заказ товара"
             );
 
 
@@ -4547,23 +4551,142 @@ if (isValidPhone(phone)) {
           }
 
 
+          const searchQuery =
+            url.searchParams
+              .get("search")
+              ?.trim() || "";
+
+          const filterDate =
+            url.searchParams
+              .get("date")
+              ?.trim() || "";
+
+          const filterType =
+            url.searchParams
+              .get("type")
+              ?.trim() || "";
+
+          const filterStatus =
+            url.searchParams
+              .get("status")
+              ?.trim() || "";
+
+
+          const conditions = [];
+          const queryParams = [];
+
+          if (searchQuery) {
+            conditions.push(
+              `(CAST(orders.id AS TEXT) = ? OR orders.name LIKE ? OR orders.phone LIKE ?)`
+            );
+            queryParams.push(
+              searchQuery,
+              `%${searchQuery}%`,
+              `%${searchQuery}%`
+            );
+          }
+
+          if (filterDate) {
+            conditions.push(
+              `date(orders.created_at) = ?`
+            );
+            queryParams.push(filterDate);
+          }
+
+          if (filterType) {
+            conditions.push(
+              `orders.type = ?`
+            );
+            queryParams.push(filterType);
+          }
+
+          if (filterStatus) {
+            conditions.push(
+              `orders.status = ?`
+            );
+            queryParams.push(filterStatus);
+          }
+
+
+          const whereSql =
+            conditions.length > 0
+              ? `WHERE ${conditions.join(" AND ")}`
+              : "";
+
+
           const orders =
             db.prepare(`
               SELECT
-  orders.*,
-  EXISTS (
-    SELECT 1
-    FROM order_items
-    WHERE order_items.order_id = orders.id
-      AND order_items.price_on_request = 1
-  ) AS has_price_on_request
-FROM orders
-ORDER BY id DESC
-            `).all();
+                orders.*,
+                EXISTS (
+                  SELECT 1
+                  FROM order_items
+                  WHERE order_items.order_id = orders.id
+                    AND order_items.price_on_request = 1
+                ) AS has_price_on_request
+              FROM orders
+              ${whereSql}
+              ORDER BY id DESC
+            `).all(...queryParams);
 
 
           let content =
             "<h1>Заказы</h1>";
+
+          content += `
+            <form method="GET" action="/orders">
+              <p>
+                <input
+                  type="search"
+                  name="search"
+                  placeholder="Номер, имя или телефон"
+                  value="${escapeHtml(searchQuery)}"
+                >
+
+                <input
+                  type="date"
+                  name="date"
+                  value="${escapeHtml(filterDate)}"
+                >
+
+                <select name="type">
+                  <option value="">
+                    Все типы
+                  </option>
+
+                  <option
+                    value="Заказ товара"
+                    ${filterType === "Заказ товара" ? "selected" : ""}
+                  >
+                    Заказ товара
+                  </option>
+                </select>
+
+                <select name="status">
+                  <option value="">
+                    Все статусы
+                  </option>
+
+                  ${
+                    ["Новая", "Новый", "В разработке", "Закрыто"]
+                      .map(status => `
+                        <option
+                          value="${escapeHtml(status)}"
+                          ${filterStatus === status ? "selected" : ""}
+                        >
+                          ${escapeHtml(status)}
+                        </option>
+                      `)
+                      .join("")
+                  }
+                </select>
+
+                <button type="submit">
+                  Найти
+                </button>
+              </p>
+            </form>
+          `;
 
 
           if (
@@ -4585,11 +4708,23 @@ ORDER BY id DESC
             ) {
 
               content += `
-                <li>
+                <li
+                  ${
+                    order.is_viewed === 0
+                      ? `style="background:#fff3cd;border:2px solid #e6a700;padding:8px;border-radius:4px;"`
+                      : ""
+                  }
+                >
 
                   <strong>
                     Заказ №${order.id}
                   </strong>
+
+                  ${
+                    order.is_viewed === 0
+                      ? `— <strong style="color:#b35c00;">(не просмотрено)</strong>`
+                      : ""
+                  }
 
                   —
                   ${escapeHtml(
@@ -4600,9 +4735,15 @@ ORDER BY id DESC
                  ${order.has_price_on_request ? "Уточняется менеджером" : order.total}
                   ${order.has_price_on_request ? "" : order.currency}
 
-                  —
+                   —
                   ${escapeHtml(
                     order.status
+                  )}
+
+                  —
+                  Тип:
+                  ${escapeHtml(
+                    order.type || ""
                   )}
 
                   <br>
@@ -4673,7 +4814,6 @@ ORDER BY id DESC
               SELECT *
               FROM orders
               WHERE id = ?
-                  AND deleted = 0
             `).get(orderId);
 
 
@@ -4699,6 +4839,13 @@ ORDER BY id DESC
               404
             );
           }
+
+
+          db.prepare(`
+            UPDATE orders
+            SET is_viewed = 1
+            WHERE id = ?
+          `).run(orderId);
 
 
           const items =
@@ -4777,14 +4924,50 @@ ORDER BY id DESC
                   )}
                 </p>
 
-                <p>
-                  Статус:
-                  ${escapeHtml(
-                    order.status
-                  )}
-                </p>
+                 <p>
+                   Статус:
+                   ${escapeHtml(
+                     order.status
+                   )}
+                 </p>
 
-                <h2>
+                  <p>
+                    Тип:
+                    ${escapeHtml(
+                      order.type || ""
+                    )}
+                  </p>
+
+                  <form
+                    method="POST"
+                    action="/orders/${orderId}/status"
+                  >
+                    <p>
+                      <label>
+                        Изменить статус:
+                        <select name="status">
+                          ${
+                            ["Новая", "В разработке", "Закрыто"]
+                              .map(status => `
+                                <option
+                                  value="${escapeHtml(status)}"
+                                  ${status === order.status ? "selected" : ""}
+                                >
+                                  ${escapeHtml(status)}
+                                </option>
+                              `)
+                              .join("")
+                          }
+                        </select>
+                      </label>
+
+                      <button type="submit">
+                        Сохранить статус
+                      </button>
+                    </p>
+                  </form>
+
+                 <h2>
                   Товары
                 </h2>
 
@@ -4808,6 +4991,112 @@ ${
                 </p>
               `
             )
+          );
+        }
+
+        // ==================================================
+        // ИЗМЕНЕНИЕ СТАТУСА ЗАКАЗА — ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/orders\/\d+\/status$/.test(path)
+        ) {
+
+          if (
+            !requireAdmin(
+              req,
+              res
+            )
+          ) {
+            return;
+          }
+
+
+          const orderId =
+            Number(
+              path.split("/")[2]
+            );
+
+
+          const params =
+            await readBody(req);
+
+          const status =
+            params.get("status")?.trim() || "";
+
+
+          const allowedStatuses = [
+            "Новая",
+            "В разработке",
+            "Закрыто"
+          ];
+
+
+          if (
+            !allowedStatuses.includes(status)
+          ) {
+
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `
+                  <h1>
+                    Некорректный статус.
+                  </h1>
+
+                  <p>
+                    <a href="/orders/${orderId}">
+                      Вернуться к заявке
+                    </a>
+                  </p>
+                `
+              ),
+              400
+            );
+          }
+
+
+          const result =
+            db.prepare(`
+              UPDATE orders
+              SET status = ?
+              WHERE id = ?
+            `).run(
+              status,
+              orderId
+            );
+
+
+          if (result.changes === 0) {
+
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Заказ не найден",
+                `
+                  <h1>
+                    Заказ не найден
+                  </h1>
+
+                  <p>
+                    <a href="/orders">
+                      Назад к заявкам
+                    </a>
+                  </p>
+                `
+              ),
+              404
+            );
+          }
+
+
+          return redirect(
+            res,
+            `/orders/${orderId}`
           );
         }
 
