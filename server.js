@@ -1017,6 +1017,79 @@ function renderRepairRequestForm(values = {}, errors = {}) {
 }
 
 // ======================================================
+// ФОРМА ОБРАТНОГО ЗВОНКА
+// ======================================================
+
+function renderCallbackRequestForm(values = {}, errors = {}) {
+
+  const fieldError = key =>
+    errors[key]
+      ? `<small style="display:block; color:red;">${escapeHtml(errors[key])}</small>`
+      : "";
+
+  return `
+    <h1>
+      Обратный звонок
+    </h1>
+
+    <form
+      method="POST"
+      action="/callback-request"
+    >
+      <p>
+        <label>
+          Имя:
+          <input
+            type="text"
+            name="name"
+            value="${escapeHtml(values.name || "")}"
+            required
+          >
+        </label>
+
+        ${fieldError("name")}
+      </p>
+
+      <p>
+        <label>
+          Телефон:
+          <input
+            type="tel"
+            name="phone"
+            value="${escapeHtml(values.phone || "")}"
+            inputmode="tel"
+            autocomplete="tel"
+            required
+            oninput="this.value = this.value.replace(/[^0-9+() -]/g, '')"
+          >
+        </label>
+
+        ${fieldError("phone")}
+      </p>
+
+      <p>
+        <label>
+          <input
+            type="checkbox"
+            name="agree"
+            value="1"
+            ${values.agree ? "checked" : ""}
+            required
+          >
+          Согласен на обработку персональных данных
+        </label>
+
+        ${fieldError("agree")}
+      </p>
+
+      <button type="submit">
+        Заказать звонок
+      </button>
+    </form>
+  `;
+}
+
+// ======================================================
 // КАТЕГОРИИ
 // ======================================================
 
@@ -4479,6 +4552,188 @@ return redirect(
 
 
          // ==================================================
+         // ОБРАТНЫЙ ЗВОНОК — GET
+         // ==================================================
+
+         if (
+           req.method === "GET" &&
+           path === "/callback-request"
+         ) {
+
+           return sendHtml(
+             res,
+             renderPage(
+               req,
+               "Обратный звонок",
+               renderCallbackRequestForm()
+             )
+           );
+         }
+
+         // ==================================================
+         // ОБРАТНЫЙ ЗВОНОК — POST
+         // ==================================================
+
+         if (
+           req.method === "POST" &&
+           path === "/callback-request"
+         ) {
+
+           const params =
+             await readBody(req);
+
+           const name =
+             params.get("name")
+               ?.trim() || "";
+
+           const phone =
+             params.get("phone")
+               ?.trim() || "";
+
+           const phoneDigits =
+             phone.replace(/[^0-9]/g, "");
+
+           const validPhone =
+             (
+               phoneDigits.length === 11 &&
+               (
+                 phoneDigits.startsWith("7") ||
+                 phoneDigits.startsWith("8")
+               )
+             ) ||
+             (
+               phoneDigits.length === 12 &&
+               phoneDigits.startsWith("375")
+             );
+
+           const formValues = {
+             name,
+             phone,
+             agree: params.get("agree") === "1"
+           };
+
+           const formErrors = {};
+
+           if (!name) {
+             formErrors.name = "Укажите имя.";
+           }
+
+           if (!validPhone) {
+             formErrors.phone = "Укажите корректный номер телефона.";
+           }
+
+           if (params.get("agree") !== "1") {
+             formErrors.agree = "Необходимо согласиться на обработку персональных данных.";
+           }
+
+           if (
+             Object.keys(formErrors).length > 0
+           ) {
+             return sendHtml(
+               res,
+               renderPage(
+                 req,
+                 "Обратный звонок",
+                 renderCallbackRequestForm(
+                   formValues,
+                   formErrors
+                 )
+               )
+             );
+           }
+
+           const result =
+             db.prepare(`
+               INSERT INTO orders
+               (
+                 name,
+                 phone,
+                 address,
+                 total,
+                 currency,
+                 created_at,
+                 status,
+                 comment,
+                 type
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             `).run(
+               name,
+               phone,
+               "",
+               0,
+               "BYN",
+               new Date().toISOString(),
+               "Новая",
+               "",
+               "Обратный звонок"
+             );
+
+           const orderId =
+             Number(
+               result.lastInsertRowid
+             );
+
+           const ordersEmail =
+             db.prepare(`
+               SELECT value
+               FROM site_settings
+               WHERE key = ?
+             `).get("orders_email")?.value?.trim();
+
+           if (ordersEmail) {
+             try {
+               await mailTransporter.sendMail({
+                 from: process.env.SMTP_USER,
+                 to: ordersEmail,
+                 subject: `Новая заявка №${orderId}`,
+                 text: [
+                   `Номер заявки: №${orderId}`,
+                   "Тип: Обратный звонок",
+                   `Имя: ${name}`,
+                   `Телефон: ${phone}`
+                 ].join("\n")
+               });
+             } catch (emailError) {
+               console.error(
+                 "Ошибка отправки email заявки:",
+                 emailError?.message || emailError
+               );
+             }
+           }
+
+           return sendHtml(
+             res,
+             renderPage(
+               req,
+               "Заявка принята",
+               `
+                 <h1>
+                   Спасибо за заявку!
+                 </h1>
+
+                 <p>
+                   Номер заявки:
+                   <strong>
+                     №${orderId}
+                   </strong>
+                 </p>
+
+                 <p>
+                   Мы перезвоним вам в ближайшее время.
+                 </p>
+
+                 <p>
+                   <a href="/callback-request">
+                     Отправить ещё одну заявку
+                   </a>
+                 </p>
+               `
+             )
+           );
+         }
+
+         // ==================================================
          // ЗАЯВКА НА РЕМОНТ — GET
          // ==================================================
 
@@ -6206,6 +6461,13 @@ if (isValidPhone(phone)) {
                     ${filterType === "Заказ товара" ? "selected" : ""}
                   >
                     Заказ товара
+                  </option>
+
+                  <option
+                    value="Обратный звонок"
+                    ${filterType === "Обратный звонок" ? "selected" : ""}
+                  >
+                    Обратный звонок
                   </option>
                 </select>
 
