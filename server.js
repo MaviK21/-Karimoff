@@ -7353,6 +7353,19 @@ for (
                   </p>
 
                   <p>
+                    Галерея изображений:
+
+                    <br>
+
+                    <input
+                      type="file"
+                      name="gallery"
+                      accept="image/jpeg,image/png,image/webp"
+                      multiple
+                    >
+                  </p>
+
+                  <p>
                     Артикул:
 
                     <br>
@@ -7666,12 +7679,54 @@ const categoryIds =
             );
 
 
-          saveProductCategories(
-            productId,
-            categoryIds
-          );
+           saveProductCategories(
+             productId,
+             categoryIds
+           );
 
-          for (const characteristic of characteristicValues) {
+           const galleryFiles =
+             params.getAllFiles("gallery");
+
+           const galleryAllowedTypes = {
+             "image/jpeg": ".jpg",
+             "image/png": ".png",
+             "image/webp": ".webp"
+           };
+
+           let gallerySortOrder =
+             db.prepare(`
+               SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+               FROM product_images
+               WHERE product_id = ?
+             `).get(productId).next_sort_order;
+
+           for (const galleryFile of galleryFiles) {
+             const galleryImage =
+               saveUploadedImage(
+                 galleryFile,
+                 galleryAllowedTypes
+               );
+
+             if (!galleryImage) {
+               continue;
+             }
+
+             db.prepare(`
+               INSERT INTO product_images
+               (
+                 product_id,
+                 image,
+                 sort_order
+               )
+               VALUES (?, ?, ?)
+             `).run(
+               productId,
+               galleryImage,
+               gallerySortOrder++
+             );
+           }
+
+           for (const characteristic of characteristicValues) {
             db.prepare(`
               INSERT INTO product_characteristics
               (
@@ -8530,6 +8585,48 @@ if (sortOrder < 1) {
   }
 
   saveProductCategories(id, categoryIds);
+
+  const galleryFiles =
+    params.getAllFiles("gallery");
+
+  const galleryAllowedTypes = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp"
+  };
+
+  let gallerySortOrder =
+    db.prepare(`
+      SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+      FROM product_images
+      WHERE product_id = ?
+    `).get(id).next_sort_order;
+
+  for (const galleryFile of galleryFiles) {
+    const galleryImage =
+      saveUploadedImage(
+        galleryFile,
+        galleryAllowedTypes
+      );
+
+    if (!galleryImage) {
+      continue;
+    }
+
+    db.prepare(`
+      INSERT INTO product_images
+      (
+        product_id,
+        image,
+        sort_order
+      )
+      VALUES (?, ?, ?)
+    `).run(
+      id,
+      galleryImage,
+      gallerySortOrder++
+    );
+  }
 
   return redirect(res, "/catalog");
 }
