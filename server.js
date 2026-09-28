@@ -4307,22 +4307,38 @@ if (isValidPhone(phone)) {
             params.get("name")
               ?.trim() || "";
 
-          const phone =
-            params.get("phone")
-              ?.trim() || "";
+           const phone =
+             params.get("phone")
+               ?.trim() || "";
 
-          const address =
-            params.get("address")
-              ?.trim() || "";
+           const phoneDigits =
+             phone.replace(/[^0-9]/g, "");
 
-         if (
-  !name ||
-  !phone ||
-  (
-    params.get("delivery") === "delivery" &&
-    !address
-  )
-) {
+           const validPhone =
+             (
+               phoneDigits.length === 11 &&
+               (
+                 phoneDigits.startsWith("7") ||
+                 phoneDigits.startsWith("8")
+               )
+             ) ||
+             (
+               phoneDigits.length === 12 &&
+               phoneDigits.startsWith("375")
+             );
+
+           const address =
+             params.get("address")
+               ?.trim() || "";
+
+          if (
+   !name ||
+   !validPhone ||
+   (
+     params.get("delivery") === "delivery" &&
+     !address
+   )
+ ) {
 
             return sendHtml(
               res,
@@ -4412,13 +4428,68 @@ if (isValidPhone(phone)) {
               item.sum,
               item.price_on_request ? 1 : 0
             );
-          }
+           }
+
+           const ordersEmail =
+             db.prepare(`
+               SELECT value
+               FROM site_settings
+               WHERE key = ?
+             `).get("orders_email")?.value?.trim();
+
+           if (ordersEmail) {
+             const customerEmail =
+               params.get("email")?.trim() || "";
+
+             const payment =
+               params.get("payment") || "";
+
+             const delivery =
+               params.get("delivery") || "";
+
+             const orderComment =
+               params.get("comment")?.trim() || "";
+
+             const itemsText =
+               items
+                 .map(item =>
+                   `${item.name} — ${item.quantity} шт. × ${item.price_on_request ? "По запросу" : `${item.price} ${item.currency}`}`
+                 )
+                 .join("\n");
+
+             try {
+               await mailTransporter.sendMail({
+                 from: process.env.SMTP_USER,
+                 to: ordersEmail,
+                 subject: `Новый заказ №${orderId}`,
+                 text: [
+                   `Номер заказа: №${orderId}`,
+                   "Тип: Заказ товара",
+                   `Имя: ${name}`,
+                   `Телефон: ${phone}`,
+                   ...(customerEmail ? [`Email: ${customerEmail}`] : []),
+                   `Адрес: ${address}`,
+                    `Способ получения: ${delivery === "delivery" ? "Доставка" : delivery}`,
+                    `Способ оплаты: ${payment === "card" ? "Банковская карта" : payment}`,
+                   "Товары:",
+                   itemsText,
+                   `Общая сумма: ${total} ${currency}`,
+                   `Комментарий: ${orderComment}`
+                 ].join("\n")
+               });
+             } catch (error) {
+               console.error(
+                 "Ошибка отправки email заказа:",
+                 error?.message || error
+               );
+             }
+           }
 
 
-          setCart(
-            res,
-            {}
-          );
+           setCart(
+             res,
+             {}
+           );
 
 
           return sendHtml(
