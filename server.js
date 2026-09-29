@@ -558,6 +558,101 @@ function saveUploadedVideo(file, allowedTypesOverride) {
   return `/uploads/${filename}`;
 }
 
+const DOCUMENT_MAX_BYTES =
+  20 * 1024 * 1024;
+
+const DOCUMENT_ALLOWED_TYPES = {
+  "application/pdf": ".pdf",
+  "application/msword": ".doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "application/vnd.ms-excel": ".xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+  "text/plain": ".txt"
+};
+
+const DOCUMENT_ALLOWED_MESSAGE =
+  "Разрешены только PDF, DOC, DOCX, XLS, XLSX и TXT. Размер — до 20 МБ.";
+
+// Проверяет документы до сохранения, чтобы не создавать товар
+// и не писать файлы, если хотя бы один файл не подходит.
+// Возвращает текст ошибки или пустую строку.
+function getDocumentValidationError(files) {
+
+  for (const file of files) {
+
+    if (!file || !file.filename || !file.data.length) {
+      continue;
+    }
+
+    if (!DOCUMENT_ALLOWED_TYPES[file.contentType]) {
+      return DOCUMENT_ALLOWED_MESSAGE;
+    }
+
+    if (file.data.length > DOCUMENT_MAX_BYTES) {
+      return DOCUMENT_ALLOWED_MESSAGE;
+    }
+  }
+
+  return "";
+}
+
+function saveUploadedDocument(file, allowedTypesOverride) {
+
+  if (!file || !file.filename || !file.data.length) {
+    return "";
+  }
+
+  const allowedTypes =
+    allowedTypesOverride || DOCUMENT_ALLOWED_TYPES;
+
+  const extension =
+    allowedTypes[file.contentType];
+
+  if (!extension) {
+    throw new Error(
+      DOCUMENT_ALLOWED_MESSAGE
+    );
+  }
+
+  if (
+    file.data.length >
+    DOCUMENT_MAX_BYTES
+  ) {
+    throw new Error(
+      DOCUMENT_ALLOWED_MESSAGE
+    );
+  }
+
+  const uploadsDir =
+    pathModule.join(
+      process.cwd(),
+      "uploads"
+    );
+
+  mkdirSync(
+    uploadsDir,
+    {
+      recursive: true
+    }
+  );
+
+  const filename =
+    `${randomBytes(16).toString("hex")}${extension}`;
+
+  const filePath =
+    pathModule.join(
+      uploadsDir,
+      filename
+    );
+
+  writeFileSync(
+    filePath,
+    file.data
+  );
+
+  return `/uploads/${filename}`;
+}
+
 // ======================================================
 // ФОРМА ЗАЯВКИ НА УСЛУГУ / АРЕНДУ ТЕХНИКИ
 // ======================================================
@@ -4031,6 +4126,50 @@ if (
     `;
   }
 
+  const productDocuments =
+    db.prepare(`
+      SELECT
+        document
+      FROM product_documents
+      WHERE product_id = ?
+      ORDER BY
+        sort_order,
+        document
+    `).all(id);
+
+  let documentHtml = "";
+
+  if (productDocuments.length > 0) {
+    documentHtml += `
+      <h2>
+        Документы
+      </h2>
+
+      <ul>
+    `;
+
+    for (const productDocument of productDocuments) {
+      const documentName =
+        productDocument.document
+          .split("/")
+          .pop();
+
+      documentHtml += `
+        <li>
+          <a
+            href="${escapeHtml(productDocument.document)}"
+            target="_blank"
+            rel="noopener"
+          >${escapeHtml(documentName)}</a>
+        </li>
+      `;
+    }
+
+    documentHtml += `
+      </ul>
+    `;
+  }
+
   return sendHtml(
     res,
     renderPage(
@@ -4060,6 +4199,8 @@ if (
         ${galleryHtml}
 
         ${videoHtml}
+
+        ${documentHtml}
 
         <p>
           <strong>
@@ -7286,6 +7427,11 @@ const priceError =
     req.url.split("?")[1] || ""
   ).get("videoError") || "";
 
+  const documentError =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("documentError") || "";
+
   const queryParams =
   new URLSearchParams(
     req.url.split("?")[1] || ""
@@ -7566,6 +7712,23 @@ for (
 
                   <p style="color:red;">
                     ${videoError || ""}
+                  </p>
+
+                  <p>
+                    Документы товара:
+
+                    <br>
+
+                    <input
+                      type="file"
+                      name="document"
+                      accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain"
+                      multiple
+                    >
+                  </p>
+
+                  <p style="color:red;">
+                    ${documentError || ""}
                   </p>
 
 
@@ -7868,6 +8031,40 @@ const categoryIds =
             );
           }
 
+          // Документы проверяем до создания товара: иначе при
+          // недопустимом файле товар остался бы без документов.
+          const documentFiles =
+            params.getAllFiles("document");
+
+          const documentError =
+            getDocumentValidationError(documentFiles);
+
+          if (documentError) {
+            return redirect(
+              res,
+              `/add-product?name=${encodeURIComponent(params.get("name") || "")}` +
+                `&sku=${encodeURIComponent(params.get("sku") || "")}` +
+                `&brand_id=${encodeURIComponent(params.get("brand_id") || "")}` +
+                `&currency=${encodeURIComponent(params.get("currency") || "")}` +
+                `&availability=${encodeURIComponent(params.get("availability") || "")}` +
+                `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+                `&price=${encodeURIComponent(params.get("price") || "")}` +
+                `&description=${encodeURIComponent(params.get("description") || "")}` +
+                `&discount=${encodeURIComponent(params.get("discount_percent") || "0")}` +
+                `&unit=${encodeURIComponent(params.get("unit") || "шт.")}` +
+                `&sort_order=${encodeURIComponent(params.get("sort_order") || "")}` +
+                `&is_new=${params.get("is_new") === "1" ? "1" : "0"}` +
+                `&is_hit=${params.get("is_hit") === "1" ? "1" : "0"}` +
+                `&characteristics=${encodeURIComponent(
+                  submittedCharacteristics
+                    .map(item => `${item.characteristicId}:${item.value}`)
+                    .join("|")
+                )}` +
+                `&documentError=${encodeURIComponent(documentError)}`
+            );
+          }
+
+
 
       
 
@@ -7994,6 +8191,37 @@ const categoryIds =
                videoSortOrder++
              );
            }
+
+           let documentSortOrder =
+             db.prepare(`
+               SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+               FROM product_documents
+               WHERE product_id = ?
+             `).get(productId).next_sort_order;
+
+           for (const documentFile of documentFiles) {
+             const documentPath =
+               saveUploadedDocument(documentFile);
+
+             if (!documentPath) {
+               continue;
+             }
+
+             db.prepare(`
+               INSERT INTO product_documents
+               (
+                 product_id,
+                 document,
+                 sort_order
+               )
+               VALUES (?, ?, ?)
+             `).run(
+               productId,
+               documentPath,
+               documentSortOrder++
+             );
+           }
+
 
 
            for (const characteristic of characteristicValues) {
@@ -8346,6 +8574,107 @@ const valuesByCharacteristicId =
             </p>
           `;
 
+          // Показываем уже загруженные документы товара рядом
+          // с полем добавления. Удаление и публичный вывод
+          // здесь не реализованы.
+          const productDocuments =
+            db.prepare(`
+              SELECT
+                document
+              FROM product_documents
+              WHERE product_id = ?
+              ORDER BY
+                sort_order,
+                document
+            `).all(id);
+
+          let documentListHtml = "";
+
+          if (productDocuments.length > 0) {
+            documentListHtml += `
+              <p>
+                Текущие документы товара:
+              </p>
+
+              <ul>
+            `;
+
+            for (const productDocument of productDocuments) {
+              const documentName =
+                productDocument.document
+                  .split("/")
+                  .pop();
+
+              documentListHtml += `
+                <li>
+                  <a
+                    href="${escapeHtml(productDocument.document)}"
+                    target="_blank"
+                    rel="noopener"
+                  >${escapeHtml(documentName)}</a>
+
+                  <form
+                    method="POST"
+                    action="/product-documents/delete/${id}"
+                    style="display:inline; margin:0;"
+                  >
+                    <input
+                      type="hidden"
+                      name="document"
+                      value="${escapeHtml(productDocument.document)}"
+                    >
+
+                    <button
+                      type="submit"
+                      title="Удалить документ"
+                      onclick="return confirm('Удалить этот документ?')"
+                      style="
+                        margin-left:8px;
+                        width:22px;
+                        height:22px;
+                        padding:0;
+                        line-height:20px;
+                        border:1px solid #ccc;
+                        border-radius:50%;
+                        background:#fff;
+                        color:#c00;
+                        font-size:14px;
+                        cursor:pointer;
+                      "
+                    >&times;</button>
+                  </form>
+                </li>
+              `;
+            }
+
+            documentListHtml += `
+              </ul>
+            `;
+          }
+
+          const documentError =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("documentError") || "";
+
+          const documentHtml = `
+            <p>
+              Добавить документы товара:
+
+              <br>
+
+              <input
+                type="file"
+                name="document"
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain"
+                multiple
+              >
+            </p>
+
+            <p style="color:red;">
+              ${documentError || ""}
+            </p>
+          `;
 
             const sortOrderError =
   new URLSearchParams(
@@ -8829,6 +9158,10 @@ value="${sortOrderValue ?? product.sort_order}"
 
                   ${videoHtml}
 
+                  ${documentListHtml}
+
+                  ${documentHtml}
+
                   <p>
                     Категории:
 
@@ -9003,6 +9336,36 @@ if (sortOrder < 1) {
     );
   }
 
+  // Документы проверяем до обновления товара, чтобы не
+  // сохранять изменения частично.
+  const documentFiles =
+    params.getAllFiles("document");
+
+  const documentError =
+    getDocumentValidationError(documentFiles);
+
+  if (documentError) {
+    return redirect(
+      res,
+      `/edit-product/${id}?name=${encodeURIComponent(params.get("name") || "")}` +
+        `&description=${encodeURIComponent(params.get("description") || "")}` +
+        `&price=${encodeURIComponent(params.get("price") || "")}` +
+        `&discount=${encodeURIComponent(params.get("discount_percent") || "")}` +
+        `&price_on_request=${params.get("price_on_request") === "1" ? "1" : "0"}` +
+        `&unit=${encodeURIComponent(params.get("unit") || "")}` +
+        `&sku=${encodeURIComponent(params.get("sku") || "")}` +
+        `&brand_id=${encodeURIComponent(params.get("brand_id") || "")}` +
+        `&currency=${encodeURIComponent(params.get("currency") || "")}` +
+        `&availability=${encodeURIComponent(params.get("availability") || "")}` +
+        `&sort_order=${encodeURIComponent(params.get("sort_order") || "")}` +
+        `&is_new=${params.get("is_new") === "1" ? "1" : "0"}` +
+        `&is_hit=${params.get("is_hit") === "1" ? "1" : "0"}` +
+        `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+        `&${characteristicParams.substring(1)}` +
+        `&documentError=${encodeURIComponent(documentError)}`
+    );
+  }
+
 
   const characteristicValues =
     getSubmittedCharacteristicValues(
@@ -9153,6 +9516,36 @@ if (sortOrder < 1) {
       id,
       videoPath,
       videoSortOrder++
+    );
+  }
+
+  let documentSortOrder =
+    db.prepare(`
+      SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+      FROM product_documents
+      WHERE product_id = ?
+    `).get(id).next_sort_order;
+
+  for (const documentFile of documentFiles) {
+    const documentPath =
+      saveUploadedDocument(documentFile);
+
+    if (!documentPath) {
+      continue;
+    }
+
+    db.prepare(`
+      INSERT INTO product_documents
+      (
+        product_id,
+        document,
+        sort_order
+      )
+      VALUES (?, ?, ?)
+    `).run(
+      id,
+      documentPath,
+      documentSortOrder++
     );
   }
 
@@ -9312,6 +9705,93 @@ if (sortOrder < 1) {
             } catch (unlinkError) {
               console.error(
                 "Не удалось удалить файл видео:",
+                unlinkError?.message || unlinkError
+              );
+            }
+          }
+
+          return redirect(
+            res,
+            `/edit-product/${productId}`
+          );
+        }
+
+        // ==================================================
+        // УДАЛИТЬ ДОКУМЕНТ ТОВАРА — ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/product-documents\/delete\/\d+$/.test(path)
+        ) {
+
+          if (
+            !requireAdmin(
+              req,
+              res
+            )
+          ) {
+            return;
+          }
+
+          const productId =
+            Number(
+              path.split("/")[3]
+            );
+
+          const params =
+            await readBody(req);
+
+          const document =
+            params.get("document") || "";
+
+          // Ищем запись по товару из маршрута и пути документа
+          // из формы: это подтверждает, что документ существует
+          // и принадлежит именно этому товару.
+          const documentRow =
+            db.prepare(`
+              SELECT product_id
+              FROM product_documents
+              WHERE product_id = ?
+                AND document = ?
+            `).get(
+              productId,
+              document
+            );
+
+          if (!documentRow) {
+            return redirect(
+              res,
+              `/edit-product/${productId}`
+            );
+          }
+
+          db.prepare(`
+            DELETE FROM product_documents
+            WHERE product_id = ?
+              AND document = ?
+          `).run(
+            productId,
+            document
+          );
+
+          // Удаляем физический файл только внутри uploads:
+          // basename отбрасывает любые попытки path traversal.
+          if (document.startsWith("/uploads/")) {
+            const uploadPath =
+              pathModule.join(
+                process.cwd(),
+                "uploads",
+                pathModule.basename(document)
+              );
+
+            try {
+              await fs.unlink(
+                uploadPath
+              );
+            } catch (unlinkError) {
+              console.error(
+                "Не удалось удалить файл документа:",
                 unlinkError?.message || unlinkError
               );
             }
