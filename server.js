@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-dotenv.config({ path: "karimoff-site/.env" });
+dotenv.config({ path: ".env" });
 
 import { createServer } from "http";
 import { randomBytes } from "crypto";
