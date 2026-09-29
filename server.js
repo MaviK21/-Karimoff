@@ -3854,6 +3854,46 @@ if (
     `;
   }
 
+  const galleryImages =
+    db.prepare(`
+      SELECT
+        image
+      FROM product_images
+      WHERE product_id = ?
+      ORDER BY
+        sort_order,
+        image
+    `).all(id);
+
+  let galleryHtml = "";
+
+  if (galleryImages.length > 0) {
+    galleryHtml += `
+      <h2>
+        Галерея
+      </h2>
+
+      <div>
+    `;
+
+    for (const galleryImage of galleryImages) {
+      galleryHtml += `
+        <a href="${escapeHtml(galleryImage.image)}">
+          <img
+            src="${escapeHtml(galleryImage.image)}"
+            alt="${escapeHtml(product.name)}"
+            width="150"
+            style="margin:4px;"
+          >
+        </a>
+      `;
+    }
+
+    galleryHtml += `
+      </div>
+    `;
+  }
+
   return sendHtml(
     res,
     renderPage(
@@ -3879,6 +3919,8 @@ if (
             `
             : ""
         }
+
+        ${galleryHtml}
 
         <p>
           <strong>
@@ -7767,9 +7809,8 @@ const categoryIds =
             )
           ) {
             return;
-          }
-
-
+          } 
+          
           const id =
             Number(
               path.split("/")[2]
@@ -7885,6 +7926,98 @@ const valuesByCharacteristicId =
               categoryCharacteristicRows,
               valuesByCharacteristicId
             );
+
+          const galleryImages =
+            db.prepare(`
+              SELECT
+                image
+              FROM product_images
+              WHERE product_id = ?
+              ORDER BY
+                sort_order,
+                image
+            `).all(id);
+
+          let galleryHtml = "";
+
+          if (galleryImages.length > 0) {
+            galleryHtml += `
+              <p>
+                Текущие изображения галереи:
+              </p>
+
+              <div>
+            `;
+
+            for (const galleryImage of galleryImages) {
+              galleryHtml += `
+                <span
+                  style="position:relative; display:inline-block; margin:8px;"
+                >
+                  <a href="${escapeHtml(galleryImage.image)}">
+                    <img
+                      src="${escapeHtml(galleryImage.image)}"
+                      alt="${escapeHtml(product.name)}"
+                      width="120"
+                      style="border:1px solid #ccc; display:block;"
+                    >
+                  </a>
+
+                  <form
+                    method="POST"
+                    action="/product-images/delete/${id}"
+                    style="margin:0;"
+                  >
+                    <input
+                      type="hidden"
+                      name="image"
+                      value="${escapeHtml(galleryImage.image)}"
+                    >
+
+                    <button
+                      type="submit"
+                      title="Удалить фото"
+                      onclick="return confirm('Удалить это фото?')"
+                      style="
+                        position:absolute;
+                        top:-8px;
+                        right:-8px;
+                        width:22px;
+                        height:22px;
+                        padding:0;
+                        line-height:20px;
+                        border:1px solid #ccc;
+                        border-radius:50%;
+                        background:#fff;
+                        color:#c00;
+                        font-size:14px;
+                        cursor:pointer;
+                      "
+                    >&times;</button>
+                  </form>
+                </span>
+              `;
+            }
+
+            galleryHtml += `
+              </div>
+            `;
+          }
+
+          galleryHtml += `
+            <p>
+              Добавить новые фото галереи:
+
+              <br>
+
+              <input
+                type="file"
+                name="gallery"
+                accept="image/jpeg,image/png,image/webp"
+                multiple
+              >
+            </p>
+          `;
 
             const sortOrderError =
   new URLSearchParams(
@@ -8361,6 +8494,8 @@ value="${sortOrderValue ?? product.sort_order}"
 >
                   </p>
 
+                  ${galleryHtml}
+
                   <p>
                     Категории:
 
@@ -8389,7 +8524,6 @@ value="${sortOrderValue ?? product.sort_order}"
             )
           );
         }
-
         // ==================================================
 // РЕДАКТИРОВАТЬ ТОВАР — POST
 // ТОЛЬКО АДМИН
@@ -8630,6 +8764,88 @@ if (sortOrder < 1) {
 
   return redirect(res, "/catalog");
 }
+
+        // ==================================================
+        // УДАЛИТЬ ФОТО ГАЛЕРЕИ — ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/product-images\/delete\/\d+$/.test(path)
+        ) {
+
+          if (
+            !requireAdmin(
+              req,
+              res
+            )
+          ) {
+            return;
+          }
+
+          const productId =
+            Number(
+              path.split("/")[3]
+            );
+
+          const params =
+            await readBody(req);
+
+          const image =
+            params.get("image") || "";
+
+          const galleryRow =
+            db.prepare(`
+              SELECT product_id
+              FROM product_images
+              WHERE product_id = ?
+                AND image = ?
+            `).get(
+              productId,
+              image
+            );
+
+          if (!galleryRow) {
+            return redirect(
+              res,
+              `/edit-product/${productId}`
+            );
+          }
+
+          db.prepare(`
+            DELETE FROM product_images
+            WHERE product_id = ?
+              AND image = ?
+          `).run(
+            productId,
+            image
+          );
+
+          if (image.startsWith("/uploads/")) {
+            const uploadPath =
+              pathModule.join(
+                process.cwd(),
+                "uploads",
+                pathModule.basename(image)
+              );
+
+            try {
+              await fs.unlink(
+                uploadPath
+              );
+            } catch (unlinkError) {
+              console.error(
+                "Не удалось удалить файл галереи:",
+                unlinkError?.message || unlinkError
+              );
+            }
+          }
+
+          return redirect(
+            res,
+            `/edit-product/${productId}`
+          );
+        }
 
         // ==================================================
         // УДАЛИТЬ ТОВАР
