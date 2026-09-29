@@ -463,6 +463,101 @@ function saveUploadedImage(file, allowedTypesOverride) {
   return `/uploads/${filename}`;
 }
 
+const VIDEO_MAX_BYTES =
+  50 * 1024 * 1024;
+
+const VIDEO_ALLOWED_TYPES = {
+  "video/mp4": ".mp4",
+  "video/webm": ".webm",
+  "video/ogg": ".ogv",
+  "video/quicktime": ".mov"
+};
+
+const VIDEO_ALLOWED_MESSAGE =
+  "Разрешены только MP4, WebM, OGG и MOV. Размер — до 50 МБ.";
+
+// Проверяет видео до сохранения, чтобы не создавать товар
+// и не писать файлы, если хотя бы один файл не подходит.
+// Возвращает текст ошибки или пустую строку.
+function getVideoValidationError(files) {
+
+  for (const file of files) {
+
+    if (!file || !file.filename || !file.data.length) {
+      continue;
+    }
+
+    if (!VIDEO_ALLOWED_TYPES[file.contentType]) {
+      return VIDEO_ALLOWED_MESSAGE;
+    }
+
+    if (file.data.length > VIDEO_MAX_BYTES) {
+      return VIDEO_ALLOWED_MESSAGE;
+    }
+  }
+
+  return "";
+}
+
+function saveUploadedVideo(file, allowedTypesOverride) {
+
+  if (!file || !file.filename || !file.data.length) {
+    return "";
+  }
+
+  const allowedTypes =
+    allowedTypesOverride || VIDEO_ALLOWED_TYPES;
+
+
+  const extension =
+    allowedTypes[file.contentType];
+
+  if (!extension) {
+    throw new Error(
+      VIDEO_ALLOWED_MESSAGE
+    );
+  }
+
+  if (
+    file.data.length >
+    VIDEO_MAX_BYTES
+  ) {
+    throw new Error(
+      VIDEO_ALLOWED_MESSAGE
+    );
+  }
+
+
+  const uploadsDir =
+    pathModule.join(
+      process.cwd(),
+      "uploads"
+    );
+
+  mkdirSync(
+    uploadsDir,
+    {
+      recursive: true
+    }
+  );
+
+  const filename =
+    `${randomBytes(16).toString("hex")}${extension}`;
+
+  const filePath =
+    pathModule.join(
+      uploadsDir,
+      filename
+    );
+
+  writeFileSync(
+    filePath,
+    file.data
+  );
+
+  return `/uploads/${filename}`;
+}
+
 // ======================================================
 // ФОРМА ЗАЯВКИ НА УСЛУГУ / АРЕНДУ ТЕХНИКИ
 // ======================================================
@@ -1830,7 +1925,11 @@ const server =
       ".jpeg": "image/jpeg",
       ".png": "image/png",
       ".webp": "image/webp",
-      ".gif": "image/gif"
+      ".gif": "image/gif",
+      ".mp4": "video/mp4",
+      ".webm": "video/webm",
+      ".ogv": "video/ogg",
+      ".mov": "video/quicktime"
     };
 
     res.writeHead(200, {
@@ -3894,6 +3993,44 @@ if (
     `;
   }
 
+  const productVideos =
+    db.prepare(`
+      SELECT
+        video
+      FROM product_videos
+      WHERE product_id = ?
+      ORDER BY
+        sort_order,
+        video
+    `).all(id);
+
+  let videoHtml = "";
+
+  if (productVideos.length > 0) {
+    videoHtml += `
+      <h2>
+        Видео
+      </h2>
+
+      <div>
+    `;
+
+    for (const productVideo of productVideos) {
+      videoHtml += `
+        <video
+          src="${escapeHtml(productVideo.video)}"
+          controls
+          width="360"
+          style="margin:4px; max-width:100%;"
+        ></video>
+      `;
+    }
+
+    videoHtml += `
+      </div>
+    `;
+  }
+
   return sendHtml(
     res,
     renderPage(
@@ -3921,6 +4058,8 @@ if (
         }
 
         ${galleryHtml}
+
+        ${videoHtml}
 
         <p>
           <strong>
@@ -7142,6 +7281,11 @@ const priceError =
     req.url.split("?")[1] || ""
   ).get("sortOrderError") || "";
 
+  const videoError =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("videoError") || "";
+
   const queryParams =
   new URLSearchParams(
     req.url.split("?")[1] || ""
@@ -7408,6 +7552,25 @@ for (
                   </p>
 
                   <p>
+                    Видео товара:
+
+                    <br>
+
+                    <input
+                      type="file"
+                      name="video"
+                      accept="video/mp4,video/webm,video/ogg,video/quicktime"
+                      multiple
+                    >
+                  </p>
+
+                  <p style="color:red;">
+                    ${videoError || ""}
+                  </p>
+
+
+
+                  <p>
                     Артикул:
 
                     <br>
@@ -7672,6 +7835,40 @@ const categoryIds =
             );
           }
 
+          // Видео проверяем до создания товара: иначе при
+          // недопустимом файле товар остался бы без видео.
+          const videoFiles =
+            params.getAllFiles("video");
+
+          const videoError =
+            getVideoValidationError(videoFiles);
+
+          if (videoError) {
+            return redirect(
+              res,
+              `/add-product?name=${encodeURIComponent(params.get("name") || "")}` +
+                `&sku=${encodeURIComponent(params.get("sku") || "")}` +
+                `&brand_id=${encodeURIComponent(params.get("brand_id") || "")}` +
+                `&currency=${encodeURIComponent(params.get("currency") || "")}` +
+                `&availability=${encodeURIComponent(params.get("availability") || "")}` +
+                `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+                `&price=${encodeURIComponent(params.get("price") || "")}` +
+                `&description=${encodeURIComponent(params.get("description") || "")}` +
+                `&discount=${encodeURIComponent(params.get("discount_percent") || "0")}` +
+                `&unit=${encodeURIComponent(params.get("unit") || "шт.")}` +
+                `&sort_order=${encodeURIComponent(params.get("sort_order") || "")}` +
+                `&is_new=${params.get("is_new") === "1" ? "1" : "0"}` +
+                `&is_hit=${params.get("is_hit") === "1" ? "1" : "0"}` +
+                `&characteristics=${encodeURIComponent(
+                  submittedCharacteristics
+                    .map(item => `${item.characteristicId}:${item.value}`)
+                    .join("|")
+                )}` +
+                `&videoError=${encodeURIComponent(videoError)}`
+            );
+          }
+
+
       
 
           const result =
@@ -7767,6 +7964,37 @@ const categoryIds =
                gallerySortOrder++
              );
            }
+
+           let videoSortOrder =
+             db.prepare(`
+               SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+               FROM product_videos
+               WHERE product_id = ?
+             `).get(productId).next_sort_order;
+
+           for (const videoFile of videoFiles) {
+             const videoPath =
+               saveUploadedVideo(videoFile);
+
+             if (!videoPath) {
+               continue;
+             }
+
+             db.prepare(`
+               INSERT INTO product_videos
+               (
+                 product_id,
+                 video,
+                 sort_order
+               )
+               VALUES (?, ?, ?)
+             `).run(
+               productId,
+               videoPath,
+               videoSortOrder++
+             );
+           }
+
 
            for (const characteristic of characteristicValues) {
             db.prepare(`
@@ -8019,10 +8247,111 @@ const valuesByCharacteristicId =
             </p>
           `;
 
+          const productVideos =
+            db.prepare(`
+              SELECT
+                video
+              FROM product_videos
+              WHERE product_id = ?
+              ORDER BY
+                sort_order,
+                video
+            `).all(id);
+
+          let videoListHtml = "";
+
+          if (productVideos.length > 0) {
+            videoListHtml += `
+              <p>
+                Текущие видео товара:
+              </p>
+
+              <div>
+            `;
+
+            for (const productVideo of productVideos) {
+              videoListHtml += `
+                <span
+                  style="position:relative; display:inline-block; margin:8px;"
+                >
+                  <video
+                    src="${escapeHtml(productVideo.video)}"
+                    controls
+                    width="240"
+                    style="border:1px solid #ccc; display:block;"
+                  ></video>
+
+                  <form
+                    method="POST"
+                    action="/product-videos/delete/${id}"
+                    style="margin:0;"
+                  >
+                    <input
+                      type="hidden"
+                      name="video"
+                      value="${escapeHtml(productVideo.video)}"
+                    >
+
+                    <button
+                      type="submit"
+                      title="Удалить видео"
+                      onclick="return confirm('Удалить это видео?')"
+                      style="
+                        position:absolute;
+                        top:-8px;
+                        right:-8px;
+                        width:22px;
+                        height:22px;
+                        padding:0;
+                        line-height:20px;
+                        border:1px solid #ccc;
+                        border-radius:50%;
+                        background:#fff;
+                        color:#c00;
+                        font-size:14px;
+                        cursor:pointer;
+                      "
+                    >&times;</button>
+                  </form>
+                </span>
+              `;
+            }
+
+            videoListHtml += `
+              </div>
+            `;
+          }
+
+          const videoError =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("videoError") || "";
+
+          const videoHtml = `
+            <p>
+              Добавить видео товара:
+
+              <br>
+
+              <input
+                type="file"
+                name="video"
+                accept="video/mp4,video/webm,video/ogg,video/quicktime"
+                multiple
+              >
+            </p>
+
+            <p style="color:red;">
+              ${videoError || ""}
+            </p>
+          `;
+
+
             const sortOrderError =
   new URLSearchParams(
     req.url.split("?")[1] || ""
   ).get("sortOrderError") || "";
+
 
   const priceValue =
   queryParams.get("price");
@@ -8496,6 +8825,10 @@ value="${sortOrderValue ?? product.sort_order}"
 
                   ${galleryHtml}
 
+                  ${videoListHtml}
+
+                  ${videoHtml}
+
                   <p>
                     Категории:
 
@@ -8640,6 +8973,37 @@ if (sortOrder < 1) {
         );
     }
 
+  // Видео проверяем до обновления товара, чтобы не
+  // сохранять изменения частично.
+  const videoFiles =
+    params.getAllFiles("video");
+
+  const videoError =
+    getVideoValidationError(videoFiles);
+
+  if (videoError) {
+    return redirect(
+      res,
+      `/edit-product/${id}?name=${encodeURIComponent(params.get("name") || "")}` +
+        `&description=${encodeURIComponent(params.get("description") || "")}` +
+        `&price=${encodeURIComponent(params.get("price") || "")}` +
+        `&discount=${encodeURIComponent(params.get("discount_percent") || "")}` +
+        `&price_on_request=${params.get("price_on_request") === "1" ? "1" : "0"}` +
+        `&unit=${encodeURIComponent(params.get("unit") || "")}` +
+        `&sku=${encodeURIComponent(params.get("sku") || "")}` +
+        `&brand_id=${encodeURIComponent(params.get("brand_id") || "")}` +
+        `&currency=${encodeURIComponent(params.get("currency") || "")}` +
+        `&availability=${encodeURIComponent(params.get("availability") || "")}` +
+        `&sort_order=${encodeURIComponent(params.get("sort_order") || "")}` +
+        `&is_new=${params.get("is_new") === "1" ? "1" : "0"}` +
+        `&is_hit=${params.get("is_hit") === "1" ? "1" : "0"}` +
+        `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+        `&${characteristicParams.substring(1)}` +
+        `&videoError=${encodeURIComponent(videoError)}`
+    );
+  }
+
+
   const characteristicValues =
     getSubmittedCharacteristicValues(
       params,
@@ -8762,6 +9126,36 @@ if (sortOrder < 1) {
     );
   }
 
+  let videoSortOrder =
+    db.prepare(`
+      SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+      FROM product_videos
+      WHERE product_id = ?
+    `).get(id).next_sort_order;
+
+  for (const videoFile of videoFiles) {
+    const videoPath =
+      saveUploadedVideo(videoFile);
+
+    if (!videoPath) {
+      continue;
+    }
+
+    db.prepare(`
+      INSERT INTO product_videos
+      (
+        product_id,
+        video,
+        sort_order
+      )
+      VALUES (?, ?, ?)
+    `).run(
+      id,
+      videoPath,
+      videoSortOrder++
+    );
+  }
+
   return redirect(res, "/catalog");
 }
 
@@ -8836,6 +9230,88 @@ if (sortOrder < 1) {
             } catch (unlinkError) {
               console.error(
                 "Не удалось удалить файл галереи:",
+                unlinkError?.message || unlinkError
+              );
+            }
+          }
+
+          return redirect(
+            res,
+            `/edit-product/${productId}`
+          );
+        }
+
+        // ==================================================
+        // УДАЛИТЬ ВИДЕО ТОВАРА — ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/product-videos\/delete\/\d+$/.test(path)
+        ) {
+
+          if (
+            !requireAdmin(
+              req,
+              res
+            )
+          ) {
+            return;
+          }
+
+          const productId =
+            Number(
+              path.split("/")[3]
+            );
+
+          const params =
+            await readBody(req);
+
+          const video =
+            params.get("video") || "";
+
+          const videoRow =
+            db.prepare(`
+              SELECT product_id
+              FROM product_videos
+              WHERE product_id = ?
+                AND video = ?
+            `).get(
+              productId,
+              video
+            );
+
+          if (!videoRow) {
+            return redirect(
+              res,
+              `/edit-product/${productId}`
+            );
+          }
+
+          db.prepare(`
+            DELETE FROM product_videos
+            WHERE product_id = ?
+              AND video = ?
+          `).run(
+            productId,
+            video
+          );
+
+          if (video.startsWith("/uploads/")) {
+            const uploadPath =
+              pathModule.join(
+                process.cwd(),
+                "uploads",
+                pathModule.basename(video)
+              );
+
+            try {
+              await fs.unlink(
+                uploadPath
+              );
+            } catch (unlinkError) {
+              console.error(
+                "Не удалось удалить файл видео:",
                 unlinkError?.message || unlinkError
               );
             }
@@ -10305,7 +10781,7 @@ if (
 
 
 // ======================================================
-// START SERVER
+// ЗАПУСК СЕРВЕРА
 // ======================================================
 
 server.listen(
