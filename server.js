@@ -2618,13 +2618,19 @@ if (
                      </a>
                    </li>
 
-                   <li>
-                     <a href="/admin/projects">
-                       Проекты
-                     </a>
-                   </li>
+                    <li>
+                      <a href="/admin/projects">
+                        Проекты
+                      </a>
+                    </li>
 
-                  </ul>
+                    <li>
+                      <a href="/admin/news">
+                        Новости
+                      </a>
+                    </li>
+
+                   </ul>
               `
             )
           );
@@ -11282,6 +11288,331 @@ if (
 
           db.prepare("DELETE FROM projects WHERE id = ?").run(id);
           return redirect(res, "/admin/projects");
+        }
+
+        // ==================================================
+        // НОВОСТИ — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/news"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const news = db.prepare(`
+            SELECT *
+            FROM news
+            ORDER BY sort_order, id
+          `).all();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Новости",
+              `
+                <h1>Управление новостями</h1>
+
+                <p><a href="/admin">← Назад в админ-панель</a></p>
+
+                <h2>Добавить новость</h2>
+
+                <form method="POST" action="/admin/news" enctype="multipart/form-data">
+                  <p>
+                    Заголовок:
+                    <input type="text" name="title" required>
+                  </p>
+
+                  <p>
+                    Краткий текст:
+                    <textarea name="short_text" required></textarea>
+                  </p>
+
+                  <p>
+                    Полный текст:
+                    <textarea name="full_text" required></textarea>
+                  </p>
+
+                  <p>
+                    Изображение:
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                  </p>
+
+                  <p>
+                    Порядок отображения:
+                    <input type="number" name="sort_order" value="0">
+                  </p>
+
+                  <button type="submit">Добавить новость</button>
+                </form>
+
+                <h2>Новости</h2>
+
+                <ul>
+                  ${news.map(item => `
+                    <li>
+                      <strong>${escapeHtml(item.title)}</strong>
+                      — ${item.is_visible ? "показывается" : "скрыта"}
+                      — порядок: ${item.sort_order}
+
+                      <a href="/admin/news/edit/${item.id}">Редактировать</a>
+                      <a href="/admin/news/toggle/${item.id}">
+                        ${item.is_visible ? "Скрыть" : "Показать"}
+                      </a>
+                      <a
+                        href="/admin/news/delete/${item.id}"
+                        onclick="return confirm('Удалить новость?')"
+                      >
+                        Удалить
+                      </a>
+                    </li>
+                  `).join("")}
+                </ul>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // НОВОСТИ — POST CREATE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path === "/admin/news"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const contentType = req.headers["content-type"] || "";
+          const params = await parseMultipartBody(req, contentType);
+          const title = params.get("title")?.trim() || "";
+          const shortText = params.get("short_text")?.trim() || "";
+          const fullText = params.get("full_text")?.trim() || "";
+          const sortOrder = Number(params.get("sort_order") || 0);
+          const imageFile = params.getFile("image");
+
+          if (
+            !title ||
+            !shortText ||
+            !fullText ||
+            !Number.isInteger(sortOrder) ||
+            sortOrder < 0
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Заполните заголовок, тексты и корректный порядок.</h1>`
+              ),
+              400
+            );
+          }
+
+          let image = "";
+          try {
+            image = imageFile ? saveUploadedImage(imageFile) : "";
+          } catch (error) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              400
+            );
+          }
+
+          db.prepare(`
+            INSERT INTO news
+            (title, short_text, full_text, image, sort_order, is_visible)
+            VALUES (?, ?, ?, ?, ?, 1)
+          `).run(title, shortText, fullText, image, sortOrder);
+
+          return redirect(res, "/admin/news");
+        }
+
+        // ==================================================
+        // НОВОСТИ — EDIT GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/news\/edit\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const item = db.prepare("SELECT * FROM news WHERE id = ?").get(id);
+
+          if (!item) {
+            return sendHtml(res, renderPage(req, "Ошибка", `<h1>Новость не найдена.</h1>`), 404);
+          }
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Редактирование новости",
+              `
+                <h1>Редактирование новости</h1>
+
+                <form method="POST" action="/admin/news/edit/${id}" enctype="multipart/form-data">
+                  <p>
+                    Заголовок:
+                    <input type="text" name="title" value="${escapeHtml(item.title)}" required>
+                  </p>
+
+                  <p>
+                    Краткий текст:
+                    <textarea name="short_text" required>${escapeHtml(item.short_text)}</textarea>
+                  </p>
+
+                  <p>
+                    Полный текст:
+                    <textarea name="full_text" required>${escapeHtml(item.full_text)}</textarea>
+                  </p>
+
+                  <p>
+                    Изображение:
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    ${item.image ? `<br><img src="${escapeHtml(item.image)}" alt="${escapeHtml(item.title)}" width="150">` : ""}
+                  </p>
+
+                  <p>
+                    Порядок отображения:
+                    <input type="number" name="sort_order" value="${item.sort_order}">
+                  </p>
+
+                  <button type="submit">Сохранить</button>
+                </form>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // НОВОСТИ — EDIT POST
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/admin\/news\/edit\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const item = db.prepare("SELECT * FROM news WHERE id = ?").get(id);
+
+          if (!item) {
+            return sendHtml(res, renderPage(req, "Ошибка", `<h1>Новость не найдена.</h1>`), 404);
+          }
+
+          const contentType = req.headers["content-type"] || "";
+          const params = await parseMultipartBody(req, contentType);
+          const title = params.get("title")?.trim() || "";
+          const shortText = params.get("short_text")?.trim() || "";
+          const fullText = params.get("full_text")?.trim() || "";
+          const sortOrder = Number(params.get("sort_order") || 0);
+          const imageFile = params.getFile("image");
+
+          if (
+            !title ||
+            !shortText ||
+            !fullText ||
+            !Number.isInteger(sortOrder) ||
+            sortOrder < 0
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Заполните заголовок, тексты и корректный порядок.</h1>`
+              ),
+              400
+            );
+          }
+
+          let image = item.image;
+          try {
+            if (imageFile) {
+              image = saveUploadedImage(imageFile);
+            }
+          } catch (error) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              400
+            );
+          }
+
+          db.prepare(`
+            UPDATE news
+            SET title = ?, short_text = ?, full_text = ?, image = ?, sort_order = ?
+            WHERE id = ?
+          `).run(title, shortText, fullText, image, sortOrder, id);
+
+          return redirect(res, "/admin/news");
+        }
+
+        // ==================================================
+        // НОВОСТИ — TOGGLE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/news\/toggle\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          db.prepare(`
+            UPDATE news
+            SET is_visible = CASE is_visible WHEN 1 THEN 0 ELSE 1 END
+            WHERE id = ?
+          `).run(id);
+
+          return redirect(res, "/admin/news");
+        }
+
+        // ==================================================
+        // НОВОСТИ — DELETE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/news\/delete\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const item = db.prepare("SELECT image FROM news WHERE id = ?").get(id);
+
+          if (item?.image) {
+            await fs.unlink(
+              pathModule.join(UPLOADS_DIR, pathModule.basename(item.image))
+            ).catch(() => {});
+          }
+
+          db.prepare("DELETE FROM news WHERE id = ?").run(id);
+          return redirect(res, "/admin/news");
         }
 
         // ==================================================
