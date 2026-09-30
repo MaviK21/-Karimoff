@@ -2375,6 +2375,13 @@ if (
             ORDER BY sort_order, id
           `).all();
 
+          const news = db.prepare(`
+            SELECT title, short_text, image
+            FROM news
+            WHERE is_visible = 1
+            ORDER BY sort_order, id
+          `).all();
+
           return sendHtml(
             res,
             renderPage(
@@ -2454,6 +2461,40 @@ if (
 
                             <p>
                               ${escapeHtml(project.description || "")}
+                            </p>
+                          </li>
+                        `).join("")}
+                      </ul>
+                    `
+                    : ""
+                }
+
+                ${
+                  news.length > 0
+                    ? `
+                      <h2>Новости</h2>
+
+                      <ul>
+                        ${news.map(item => `
+                          <li>
+                            <h3>${escapeHtml(item.title)}</h3>
+
+                            ${
+                              item.image
+                                ? `
+                                  <p>
+                                    <img
+                                      src="${escapeHtml(item.image)}"
+                                      alt="${escapeHtml(item.title)}"
+                                      style="max-width:200px; max-height:200px;"
+                                    >
+                                  </p>
+                                `
+                                : ""
+                            }
+
+                            <p>
+                              ${escapeHtml(item.short_text || "")}
                             </p>
                           </li>
                         `).join("")}
