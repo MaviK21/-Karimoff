@@ -1560,6 +1560,118 @@ function saveProductCategories(
 }
 
 
+// ======================================================
+// РЕКОМЕНДОВАННЫЕ ТОВАРЫ
+// ======================================================
+
+function getProductRecommendationIds(
+  productId
+) {
+  return db
+    .prepare(`
+      SELECT recommended_product_id
+      FROM product_recommendations
+      WHERE product_id = ?
+      ORDER BY
+        sort_order,
+        id
+    `)
+    .all(productId)
+    .map(row => row.recommended_product_id);
+}
+
+
+// Заменяет старые связи текущего товара на новый список.
+// sort_order хранит порядок выбора. Товар не может
+// рекомендовать сам себя.
+function saveProductRecommendations(
+  productId,
+  recommendedProductIds
+) {
+  db.prepare(`
+    DELETE FROM product_recommendations
+    WHERE product_id = ?
+  `).run(productId);
+
+  const insert =
+    db.prepare(`
+      INSERT INTO product_recommendations
+      (
+        product_id,
+        recommended_product_id,
+        sort_order
+      )
+      VALUES (?, ?, ?)
+    `);
+
+  let sortOrder = 0;
+
+  for (const recommendedProductId of recommendedProductIds) {
+    if (recommendedProductId === productId) {
+      continue;
+    }
+
+    insert.run(
+      productId,
+      recommendedProductId,
+      sortOrder++
+    );
+  }
+}
+
+
+function getProductsForRecommendations(
+  excludeProductId = null
+) {
+  return db
+    .prepare(`
+      SELECT
+        id,
+        name
+      FROM products
+      WHERE deleted = 0
+      ORDER BY
+        name,
+        id
+    `)
+    .all()
+    .filter(
+      product =>
+        excludeProductId === null ||
+        product.id !== excludeProductId
+    );
+}
+
+
+function renderProductRecommendationOptions(
+  products,
+  selectedIds = []
+) {
+  let html = "";
+
+  const selectedSet =
+    new Set(selectedIds.map(String));
+
+  for (const product of products) {
+    const selected =
+      selectedSet.has(String(product.id))
+        ? "selected"
+        : "";
+
+    html += `
+      <option
+        value="${product.id}"
+        ${selected}
+      >
+        ${escapeHtml(product.name)}
+      </option>
+    `;
+  }
+
+  return html;
+}
+
+
 function getProductCategoryNames(
   productId
 ) {
@@ -4137,6 +4249,26 @@ if (
         document
     `).all(id);
 
+  const recommendedProducts =
+    db.prepare(`
+      SELECT
+        p.id,
+        p.name,
+        p.image
+      FROM product_recommendations pr
+
+      JOIN products p
+        ON p.id = pr.recommended_product_id
+
+      WHERE
+        pr.product_id = ?
+        AND p.deleted = 0
+
+      ORDER BY
+        pr.sort_order,
+        pr.id
+    `).all(id);
+
   let documentHtml = "";
 
   if (productDocuments.length > 0) {
@@ -4166,6 +4298,50 @@ if (
     }
 
     documentHtml += `
+      </ul>
+    `;
+  }
+
+  let recommendationHtml = "";
+
+  if (recommendedProducts.length > 0) {
+    recommendationHtml += `
+      <h2>
+        Рекомендованные товары
+      </h2>
+
+      <ul>
+    `;
+
+    for (const recommendedProduct of recommendedProducts) {
+      recommendationHtml += `
+        <li>
+          <p>
+            <a href="/product/${recommendedProduct.id}">
+              <strong>
+                ${escapeHtml(recommendedProduct.name)}
+              </strong>
+            </a>
+          </p>
+
+          ${
+            recommendedProduct.image
+              ? `
+                <p>
+                  <img
+                    src="${escapeHtml(recommendedProduct.image)}"
+                    alt="${escapeHtml(recommendedProduct.name)}"
+                    style="max-width:200px; max-height:200px;"
+                  >
+                </p>
+              `
+              : ""
+          }
+        </li>
+      `;
+    }
+
+    recommendationHtml += `
       </ul>
     `;
   }
@@ -4268,6 +4444,8 @@ if (
             В корзину
           </a>
         </p>
+
+        ${recommendationHtml}
 
         ${
           isAdmin(req)
@@ -7484,6 +7662,13 @@ const brandValue =
     ?.split(",")
     .filter(Boolean) || [];
 
+  const recommendedValues =
+  new URLSearchParams(
+    req.url.split("?")[1] || ""
+  ).get("recommended_ids")
+    ?.split(",")
+    .filter(Boolean) || [];
+
   const descriptionValue =
   new URLSearchParams(
     req.url.split("?")[1] || ""
@@ -7808,6 +7993,31 @@ for (
                     несколько категорий.
                   </p>
 
+                  <p>
+                    Рекомендуемые товары:
+
+                    <br>
+
+                    <select
+                      name="recommended_ids"
+                      multiple
+                      size="6"
+                    >
+
+                      ${renderProductRecommendationOptions(
+  getProductsForRecommendations(),
+  recommendedValues
+)}
+
+                    </select>
+                  </p>
+
+                  <p>
+                    Можно выбрать
+                    несколько товаров
+                    для рекомендаций.
+                  </p>
+
                   ${renderCharacteristicInputs(
                     categoryCharacteristicRows,
                     characteristicValues
@@ -7880,7 +8090,7 @@ const params =
            if (price <= 0) {
   return redirect(
     res,
-`/add-product?name=${encodeURIComponent(params.get("name") || "")}&sku=${encodeURIComponent(params.get("sku") || "")}&brand_id=${encodeURIComponent(params.get("brand_id") || "")}&currency=${encodeURIComponent(params.get("currency") || "")}&availability=${encodeURIComponent(params.get("availability") || "")}&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}&price=&characteristics=${encodeURIComponent(
+`/add-product?name=${encodeURIComponent(params.get("name") || "")}&sku=${encodeURIComponent(params.get("sku") || "")}&brand_id=${encodeURIComponent(params.get("brand_id") || "")}&currency=${encodeURIComponent(params.get("currency") || "")}&availability=${encodeURIComponent(params.get("availability") || "")}&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}&recommended_ids=${encodeURIComponent(params.getAll("recommended_ids").join(","))}&price=&characteristics=${encodeURIComponent(
   submittedCharacteristics
     .map(item => `${item.characteristicId}:${item.value}`)
     .join("|")
@@ -7946,6 +8156,14 @@ const categoryIds =
                 Number.isInteger
               );
 
+const recommendedIds =
+            params
+              .getAll("recommended_ids")
+              .map(Number)
+              .filter(
+                Number.isInteger
+              );
+
   if (sortOrder < 1) {
   return redirect(
     res,
@@ -7955,6 +8173,7 @@ const categoryIds =
       `&currency=${encodeURIComponent(params.get("currency") || "")}` +
       `&availability=${encodeURIComponent(params.get("availability") || "")}` +
       `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+      `&recommended_ids=${encodeURIComponent(params.getAll("recommended_ids").join(","))}` +
       `&price=${encodeURIComponent(params.get("price") || "")}` +
       `&description=${encodeURIComponent(params.get("description") || "")}` +
       `&discount=${encodeURIComponent(params.get("discount_percent") || "0")}` +
@@ -8015,6 +8234,7 @@ const categoryIds =
                 `&currency=${encodeURIComponent(params.get("currency") || "")}` +
                 `&availability=${encodeURIComponent(params.get("availability") || "")}` +
                 `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+                `&recommended_ids=${encodeURIComponent(params.getAll("recommended_ids").join(","))}` +
                 `&price=${encodeURIComponent(params.get("price") || "")}` +
                 `&description=${encodeURIComponent(params.get("description") || "")}` +
                 `&discount=${encodeURIComponent(params.get("discount_percent") || "0")}` +
@@ -8048,6 +8268,7 @@ const categoryIds =
                 `&currency=${encodeURIComponent(params.get("currency") || "")}` +
                 `&availability=${encodeURIComponent(params.get("availability") || "")}` +
                 `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+                `&recommended_ids=${encodeURIComponent(params.getAll("recommended_ids").join(","))}` +
                 `&price=${encodeURIComponent(params.get("price") || "")}` +
                 `&description=${encodeURIComponent(params.get("description") || "")}` +
                 `&discount=${encodeURIComponent(params.get("discount_percent") || "0")}` +
@@ -8118,6 +8339,11 @@ const categoryIds =
            saveProductCategories(
              productId,
              categoryIds
+           );
+
+           saveProductRecommendations(
+             productId,
+             recommendedIds
            );
 
            const galleryFiles =
@@ -8316,6 +8542,17 @@ const selectedIds =
         .filter(Boolean)
         .map(Number)
     : getProductCategoryIds(id);
+
+const recommendedIdsParam =
+  queryParams.get("recommended_ids");
+
+const selectedRecommendedIds =
+  recommendedIdsParam !== null
+    ? recommendedIdsParam
+        .split(",")
+        .filter(Boolean)
+        .map(Number)
+    : getProductRecommendationIds(id);
 
           const categoryCharacteristicRows =
             getCategoryCharacteristicRows();
@@ -9179,6 +9416,33 @@ value="${sortOrderValue ?? product.sort_order}"
                     </select>
                   </p>
 
+                  <p>
+                    Рекомендуемые товары:
+
+                    <br>
+
+                    <select
+                      name="recommended_ids"
+                      multiple
+                      size="6"
+                    >
+
+                      ${renderProductRecommendationOptions(
+  getProductsForRecommendations(id),
+  selectedRecommendedIds
+)}
+
+                    </select>
+                  </p>
+
+                  <p>
+                    Можно выбрать
+                    несколько товаров
+                    для рекомендаций.
+                    Текущий товар
+                    недоступен для выбора.
+                  </p>
+
                   <button>
                     Сохранить
                   </button>
@@ -9269,6 +9533,16 @@ const categoryIds =
     .getAll("category_ids")
     .map(Number)
     .filter(Number.isInteger);
+
+const recommendedIds =
+  params
+    .getAll("recommended_ids")
+    .map(Number)
+    .filter(Number.isInteger)
+    .filter(
+      recommendedProductId =>
+        recommendedProductId !== id
+    );
   
   const characteristicParams =
   getCharacteristicsForCategoryIds(
@@ -9301,6 +9575,7 @@ if (sortOrder < 1) {
       `&is_new=${params.get("is_new") === "1" ? "1" : "0"}` +
       `&is_hit=${params.get("is_hit") === "1" ? "1" : "0"}` +
       `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+      `&recommended_ids=${encodeURIComponent(params.getAll("recommended_ids").join(","))}` +
       `&${characteristicParams.substring(1)}` +
       `&sortOrderError=${encodeURIComponent("Порядок должен быть больше 0.")}`
         );
@@ -9330,9 +9605,10 @@ if (sortOrder < 1) {
         `&sort_order=${encodeURIComponent(params.get("sort_order") || "")}` +
         `&is_new=${params.get("is_new") === "1" ? "1" : "0"}` +
         `&is_hit=${params.get("is_hit") === "1" ? "1" : "0"}` +
-        `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
-        `&${characteristicParams.substring(1)}` +
-        `&videoError=${encodeURIComponent(videoError)}`
+      `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+      `&recommended_ids=${encodeURIComponent(params.getAll("recommended_ids").join(","))}` +
+      `&${characteristicParams.substring(1)}` +
+      `&videoError=${encodeURIComponent(videoError)}`
     );
   }
 
@@ -9360,9 +9636,10 @@ if (sortOrder < 1) {
         `&sort_order=${encodeURIComponent(params.get("sort_order") || "")}` +
         `&is_new=${params.get("is_new") === "1" ? "1" : "0"}` +
         `&is_hit=${params.get("is_hit") === "1" ? "1" : "0"}` +
-        `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
-        `&${characteristicParams.substring(1)}` +
-        `&documentError=${encodeURIComponent(documentError)}`
+      `&category_ids=${encodeURIComponent(params.getAll("category_ids").join(","))}` +
+      `&recommended_ids=${encodeURIComponent(params.getAll("recommended_ids").join(","))}` +
+      `&${characteristicParams.substring(1)}` +
+      `&documentError=${encodeURIComponent(documentError)}`
     );
   }
 
@@ -9446,6 +9723,8 @@ if (sortOrder < 1) {
   }
 
   saveProductCategories(id, categoryIds);
+
+  saveProductRecommendations(id, recommendedIds);
 
   const galleryFiles =
     params.getAllFiles("gallery");
