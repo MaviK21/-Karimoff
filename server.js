@@ -2368,6 +2368,13 @@ if (
             ORDER BY sort_order, id
           `).all();
 
+          const projects = db.prepare(`
+            SELECT name, description, image
+            FROM projects
+            WHERE is_visible = 1
+            ORDER BY sort_order, id
+          `).all();
+
           return sendHtml(
             res,
             renderPage(
@@ -2413,6 +2420,40 @@ if (
 
                             <p>
                               ${escapeHtml(service.short_description || "")}
+                            </p>
+                          </li>
+                        `).join("")}
+                      </ul>
+                    `
+                    : ""
+                }
+
+                ${
+                  projects.length > 0
+                    ? `
+                      <h2>Проекты</h2>
+
+                      <ul>
+                        ${projects.map(project => `
+                          <li>
+                            <h3>${escapeHtml(project.name)}</h3>
+
+                            ${
+                              project.image
+                                ? `
+                                  <p>
+                                    <img
+                                      src="${escapeHtml(project.image)}"
+                                      alt="${escapeHtml(project.name)}"
+                                      style="max-width:200px; max-height:200px;"
+                                    >
+                                  </p>
+                                `
+                                : ""
+                            }
+
+                            <p>
+                              ${escapeHtml(project.description || "")}
                             </p>
                           </li>
                         `).join("")}
