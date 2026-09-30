@@ -2361,6 +2361,12 @@ if (
           req.method === "GET" &&
           path === "/"
         ) {
+          const services = db.prepare(`
+            SELECT name, short_description, image
+            FROM services
+            WHERE is_visible = 1
+            ORDER BY sort_order, id
+          `).all();
 
           return sendHtml(
             res,
@@ -2380,6 +2386,40 @@ if (
                     Перейти в каталог
                   </a>
                 </p>
+
+                ${
+                  services.length > 0
+                    ? `
+                      <h2>Услуги</h2>
+
+                      <ul>
+                        ${services.map(service => `
+                          <li>
+                            <h3>${escapeHtml(service.name)}</h3>
+
+                            ${
+                              service.image
+                                ? `
+                                  <p>
+                                    <img
+                                      src="${escapeHtml(service.image)}"
+                                      alt="${escapeHtml(service.name)}"
+                                      style="max-width:200px; max-height:200px;"
+                                    >
+                                  </p>
+                                `
+                                : ""
+                            }
+
+                            <p>
+                              ${escapeHtml(service.short_description || "")}
+                            </p>
+                          </li>
+                        `).join("")}
+                      </ul>
+                    `
+                    : ""
+                }
               `
             )
           );
