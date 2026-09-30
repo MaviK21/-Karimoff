@@ -198,6 +198,81 @@ function isValidPhone(phone) {
   );
 }
 
+const contactSettingKeys = [
+  "contact_phone",
+  "contact_email",
+  "contact_address",
+  "contact_working_hours",
+  "contact_telegram",
+  "contact_whatsapp",
+  "contact_viber",
+  "contact_vk",
+  "contact_instagram",
+  "contact_facebook"
+];
+
+function getContactSettings() {
+  const rows = db.prepare(`
+    SELECT key, value
+    FROM site_settings
+    WHERE key IN (${contactSettingKeys.map(() => "?").join(",")})
+  `).all(...contactSettingKeys);
+
+  return Object.fromEntries(
+    contactSettingKeys.map(key => [
+      key,
+      rows.find(row => row.key === key)?.value || ""
+    ])
+  );
+}
+
+function validateContactSettings(values) {
+  const errors = {};
+
+  if (values.contact_phone && !isValidPhone(values.contact_phone)) {
+    errors.contact_phone = "Укажите корректный номер телефона.";
+  }
+
+  if (
+    values.contact_email &&
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.contact_email)
+  ) {
+    errors.contact_email = "Укажите корректный email.";
+  }
+
+  for (const key of [
+    "contact_telegram",
+    "contact_whatsapp",
+    "contact_viber",
+    "contact_vk",
+    "contact_instagram",
+    "contact_facebook"
+  ]) {
+    if (values[key] && !/^https?:\/\//i.test(values[key])) {
+      errors[key] = "Ссылка должна начинаться с http:// или https://.";
+    }
+  }
+
+  return errors;
+}
+
+function saveContactSettings(values) {
+  const statement = db.prepare(`
+    INSERT INTO site_settings (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key)
+    DO UPDATE SET value = excluded.value
+  `);
+
+  const transaction = db.transaction(() => {
+    for (const key of contactSettingKeys) {
+      statement.run(key, values[key] || "");
+    }
+  });
+
+  transaction();
+}
+
 
 function renderPage(
   req,
@@ -2450,22 +2525,173 @@ if (
                      </a>
                    </li>
 
-                 </ul>
+                   <li>
+                     <a href="/admin/contacts">
+                       Контакты
+                     </a>
+                   </li>
+
+                  </ul>
               `
             )
           );
          }
 
 
-         // ==================================================
-         // НАСТРОЙКИ САЙТА — GET
-         // ТОЛЬКО АДМИН
-         // ==================================================
+          // ==================================================
+          // КОНТАКТЫ — GET
+          // ТОЛЬКО АДМИН
+          // ==================================================
 
-         if (
-           req.method === "GET" &&
-           path === "/admin/settings"
-         ) {
+          if (
+            req.method === "GET" &&
+            path === "/admin/contacts"
+          ) {
+            if (!requireAdmin(req, res)) {
+              return;
+            }
+
+            const values = getContactSettings();
+
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Контакты",
+                `
+                  <h1>Контакты</h1>
+
+                  <form method="POST" action="/admin/contacts">
+                    <p>
+                      <label>
+                        Телефон:
+                        <input type="tel" name="contact_phone" value="${escapeHtml(values.contact_phone)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        Email:
+                        <input type="email" name="contact_email" value="${escapeHtml(values.contact_email)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        Адрес:
+                        <input type="text" name="contact_address" value="${escapeHtml(values.contact_address)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        Часы работы:
+                        <input type="text" name="contact_working_hours" value="${escapeHtml(values.contact_working_hours)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        Telegram:
+                        <input type="url" name="contact_telegram" value="${escapeHtml(values.contact_telegram)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        WhatsApp:
+                        <input type="url" name="contact_whatsapp" value="${escapeHtml(values.contact_whatsapp)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        Viber:
+                        <input type="url" name="contact_viber" value="${escapeHtml(values.contact_viber)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        VK:
+                        <input type="url" name="contact_vk" value="${escapeHtml(values.contact_vk)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        Instagram:
+                        <input type="url" name="contact_instagram" value="${escapeHtml(values.contact_instagram)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        Facebook:
+                        <input type="url" name="contact_facebook" value="${escapeHtml(values.contact_facebook)}">
+                      </label>
+                    </p>
+
+                    <button type="submit">Сохранить</button>
+                  </form>
+                `
+              )
+            );
+          }
+
+          // ==================================================
+          // КОНТАКТЫ — POST
+          // ТОЛЬКО АДМИН
+          // ==================================================
+
+          if (
+            req.method === "POST" &&
+            path === "/admin/contacts"
+          ) {
+            if (!requireAdmin(req, res)) {
+              return;
+            }
+
+            const params = await readBody(req);
+            const values = Object.fromEntries(
+              contactSettingKeys.map(key => [
+                key,
+                params.get(key)?.trim() || ""
+              ])
+            );
+            const errors = validateContactSettings(values);
+
+            if (Object.keys(errors).length > 0) {
+              return sendHtml(
+                res,
+                renderPage(
+                  req,
+                  "Ошибка в контактах",
+                  `
+                    <h1>Ошибка валидации</h1>
+                    <ul>
+                      ${Object.values(errors).map(error => `<li>${escapeHtml(error)}</li>`).join("")}
+                    </ul>
+                    <p><a href="/admin/contacts">Вернуться к контактам</a></p>
+                  `
+                ),
+                400
+              );
+            }
+
+            saveContactSettings(values);
+            return redirect(res, "/admin/contacts");
+          }
+
+          // ==================================================
+          // НАСТРОЙКИ САЙТА — GET
+          // ТОЛЬКО АДМИН
+          // ==================================================
+
+          if (
+            req.method === "GET" &&
+            path === "/admin/settings"
+          ) {
 
            if (!requireAdmin(req, res)) {
              return;
