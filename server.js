@@ -2577,6 +2577,12 @@ if (
                      </a>
                    </li>
 
+                   <li>
+                     <a href="/admin/projects">
+                       Проекты
+                     </a>
+                   </li>
+
                   </ul>
               `
             )
@@ -10925,6 +10931,316 @@ if (
 
           db.prepare("DELETE FROM services WHERE id = ?").run(id);
           return redirect(res, "/admin/services");
+        }
+
+        // ==================================================
+        // ПРОЕКТЫ — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/projects"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const projects = db.prepare(`
+            SELECT *
+            FROM projects
+            ORDER BY sort_order, id
+          `).all();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Проекты",
+              `
+                <h1>Управление проектами</h1>
+
+                <p><a href="/admin">← Назад в админ-панель</a></p>
+
+                <h2>Добавить проект</h2>
+
+                <form method="POST" action="/admin/projects" enctype="multipart/form-data">
+                  <p>
+                    Название:
+                    <input type="text" name="name" required>
+                  </p>
+
+                  <p>
+                    Описание:
+                    <textarea name="description" required></textarea>
+                  </p>
+
+                  <p>
+                    Изображение:
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                  </p>
+
+                  <p>
+                    Порядок отображения:
+                    <input type="number" name="sort_order" value="0">
+                  </p>
+
+                  <button type="submit">Добавить проект</button>
+                </form>
+
+                <h2>Проекты</h2>
+
+                <ul>
+                  ${projects.map(project => `
+                    <li>
+                      <strong>${escapeHtml(project.name)}</strong>
+                      — ${project.is_visible ? "показывается" : "скрыт"}
+                      — порядок: ${project.sort_order}
+
+                      <a href="/admin/projects/edit/${project.id}">Редактировать</a>
+                      <a href="/admin/projects/toggle/${project.id}">
+                        ${project.is_visible ? "Скрыть" : "Показать"}
+                      </a>
+                      <a
+                        href="/admin/projects/delete/${project.id}"
+                        onclick="return confirm('Удалить проект?')"
+                      >
+                        Удалить
+                      </a>
+                    </li>
+                  `).join("")}
+                </ul>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // ПРОЕКТЫ — POST CREATE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path === "/admin/projects"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const contentType = req.headers["content-type"] || "";
+          const params = await parseMultipartBody(req, contentType);
+          const name = params.get("name")?.trim() || "";
+          const description = params.get("description")?.trim() || "";
+          const sortOrder = Number(params.get("sort_order") || 0);
+          const imageFile = params.getFile("image");
+
+          if (
+            !name ||
+            !description ||
+            !Number.isInteger(sortOrder) ||
+            sortOrder < 0
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Заполните название, описание и корректный порядок.</h1>`
+              ),
+              400
+            );
+          }
+
+          let image = "";
+          try {
+            image = imageFile ? saveUploadedImage(imageFile) : "";
+          } catch (error) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              400
+            );
+          }
+
+          db.prepare(`
+            INSERT INTO projects (name, description, image, sort_order, is_visible)
+            VALUES (?, ?, ?, ?, 1)
+          `).run(name, description, image, sortOrder);
+
+          return redirect(res, "/admin/projects");
+        }
+
+        // ==================================================
+        // ПРОЕКТЫ — EDIT GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/projects\/edit\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const project = db.prepare("SELECT * FROM projects WHERE id = ?").get(id);
+
+          if (!project) {
+            return sendHtml(res, renderPage(req, "Ошибка", `<h1>Проект не найден.</h1>`), 404);
+          }
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Редактирование проекта",
+              `
+                <h1>Редактирование проекта</h1>
+
+                <form method="POST" action="/admin/projects/edit/${id}" enctype="multipart/form-data">
+                  <p>
+                    Название:
+                    <input type="text" name="name" value="${escapeHtml(project.name)}" required>
+                  </p>
+
+                  <p>
+                    Описание:
+                    <textarea name="description" required>${escapeHtml(project.description)}</textarea>
+                  </p>
+
+                  <p>
+                    Изображение:
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    ${project.image ? `<br><img src="${escapeHtml(project.image)}" alt="${escapeHtml(project.name)}" width="150">` : ""}
+                  </p>
+
+                  <p>
+                    Порядок отображения:
+                    <input type="number" name="sort_order" value="${project.sort_order}">
+                  </p>
+
+                  <button type="submit">Сохранить</button>
+                </form>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // ПРОЕКТЫ — EDIT POST
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/admin\/projects\/edit\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const project = db.prepare("SELECT * FROM projects WHERE id = ?").get(id);
+
+          if (!project) {
+            return sendHtml(res, renderPage(req, "Ошибка", `<h1>Проект не найден.</h1>`), 404);
+          }
+
+          const contentType = req.headers["content-type"] || "";
+          const params = await parseMultipartBody(req, contentType);
+          const name = params.get("name")?.trim() || "";
+          const description = params.get("description")?.trim() || "";
+          const sortOrder = Number(params.get("sort_order") || 0);
+          const imageFile = params.getFile("image");
+
+          if (
+            !name ||
+            !description ||
+            !Number.isInteger(sortOrder) ||
+            sortOrder < 0
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Заполните название, описание и корректный порядок.</h1>`
+              ),
+              400
+            );
+          }
+
+          let image = project.image;
+          try {
+            if (imageFile) {
+              image = saveUploadedImage(imageFile);
+            }
+          } catch (error) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              400
+            );
+          }
+
+          db.prepare(`
+            UPDATE projects
+            SET name = ?, description = ?, image = ?, sort_order = ?
+            WHERE id = ?
+          `).run(name, description, image, sortOrder, id);
+
+          return redirect(res, "/admin/projects");
+        }
+
+        // ==================================================
+        // ПРОЕКТЫ — TOGGLE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/projects\/toggle\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          db.prepare(`
+            UPDATE projects
+            SET is_visible = CASE is_visible WHEN 1 THEN 0 ELSE 1 END
+            WHERE id = ?
+          `).run(id);
+
+          return redirect(res, "/admin/projects");
+        }
+
+        // ==================================================
+        // ПРОЕКТЫ — DELETE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/projects\/delete\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const project = db.prepare("SELECT image FROM projects WHERE id = ?").get(id);
+
+          if (project?.image) {
+            await fs.unlink(
+              pathModule.join(UPLOADS_DIR, pathModule.basename(project.image))
+            ).catch(() => {});
+          }
+
+          db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+          return redirect(res, "/admin/projects");
         }
 
         // ==================================================
