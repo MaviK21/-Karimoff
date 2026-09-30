@@ -12,7 +12,13 @@ import fs from "fs/promises";
 import { mkdirSync, writeFileSync } from "fs";
 
 const PORT = 3000;
-const ADMIN_PASSWORD = "12345";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+if (!ADMIN_PASSWORD) {
+  throw new Error(
+    "Ошибка конфигурации: переменная окружения ADMIN_PASSWORD не задана."
+  );
+}
 
 const mailTransporter =
   nodemailer.createTransport({
