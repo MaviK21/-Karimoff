@@ -2671,6 +2671,12 @@ if (
                       </a>
                     </li>
 
+                    <li>
+                      <a href="/admin/main-banner">
+                        Главный баннер
+                      </a>
+                    </li>
+
                    </ul>
               `
             )
@@ -11654,6 +11660,200 @@ if (
 
           db.prepare("DELETE FROM news WHERE id = ?").run(id);
           return redirect(res, "/admin/news");
+        }
+
+        // ==================================================
+        // ГЛАВНЫЙ БАННЕР — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/main-banner"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const banner = db.prepare(`
+            SELECT *
+            FROM main_banners
+            ORDER BY id
+            LIMIT 1
+          `).get();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Главный баннер",
+              `
+                <h1>Главный баннер</h1>
+
+                <p><a href="/admin">← Назад в админ-панель</a></p>
+
+                <form method="POST" action="/admin/main-banner" enctype="multipart/form-data">
+                  <p>
+                    Заголовок:
+                    <input
+                      type="text"
+                      name="title"
+                      value="${escapeHtml(banner?.title || "")}"
+                      required
+                    >
+                  </p>
+
+                  <p>
+                    Описание:
+                    <textarea name="description" required>${escapeHtml(banner?.description || "")}</textarea>
+                  </p>
+
+                  <p>
+                    Изображение:
+                    <input
+                      type="file"
+                      name="image"
+                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      ${banner?.image ? "" : "required"}
+                    >
+                    ${banner?.image ? `<br><img src="${escapeHtml(banner.image)}" alt="${escapeHtml(banner.title)}" width="200">` : ""}
+                  </p>
+
+                  <p>
+                    Текст кнопки:
+                    <input
+                      type="text"
+                      name="button_text"
+                      value="${escapeHtml(banner?.button_text || "")}"
+                      required
+                    >
+                  </p>
+
+                  <p>
+                    Ссылка кнопки:
+                    <input
+                      type="text"
+                      name="button_url"
+                      value="${escapeHtml(banner?.button_url || "")}"
+                      required
+                    >
+                  </p>
+
+                  <p>
+                    <label>
+                      <input
+                        type="checkbox"
+                        name="is_visible"
+                        value="1"
+                        ${!banner || banner.is_visible ? "checked" : ""}
+                      >
+                      Показывать баннер
+                    </label>
+                  </p>
+
+                  <button type="submit">
+                    ${banner ? "Сохранить" : "Создать"}
+                  </button>
+                </form>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // ГЛАВНЫЙ БАННЕР — POST
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path === "/admin/main-banner"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const contentType = req.headers["content-type"] || "";
+          const params = await parseMultipartBody(req, contentType);
+          const title = params.get("title")?.trim() || "";
+          const description = params.get("description")?.trim() || "";
+          const buttonText = params.get("button_text")?.trim() || "";
+          const buttonUrl = params.get("button_url")?.trim() || "";
+          const imageFile = params.getFile("image");
+          const isVisible = params.get("is_visible") === "1" ? 1 : 0;
+          const existingBanner = db.prepare(`
+            SELECT *
+            FROM main_banners
+            ORDER BY id
+            LIMIT 1
+          `).get();
+
+          const validButtonUrl =
+            /^(https?:\/\/|\/)[^\s]+$/i.test(buttonUrl);
+
+          if (
+            !title ||
+            !description ||
+            !buttonText ||
+            !buttonUrl ||
+            !validButtonUrl ||
+            (!existingBanner && !imageFile)
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Заполните все поля и укажите корректную ссылку кнопки.</h1>`
+              ),
+              400
+            );
+          }
+
+          let image = existingBanner?.image || "";
+
+          try {
+            if (imageFile) {
+              image = saveUploadedImage(imageFile);
+            }
+          } catch (error) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              400
+            );
+          }
+
+          if (existingBanner) {
+            db.prepare(`
+              UPDATE main_banners
+              SET title = ?, description = ?, image = ?, button_text = ?, button_url = ?, is_visible = ?
+              WHERE id = ?
+            `).run(
+              title,
+              description,
+              image,
+              buttonText,
+              buttonUrl,
+              isVisible,
+              existingBanner.id
+            );
+          } else {
+            db.prepare(`
+              INSERT INTO main_banners
+              (title, description, image, button_text, button_url, is_visible)
+              VALUES (?, ?, ?, ?, ?, ?)
+            `).run(
+              title,
+              description,
+              image,
+              buttonText,
+              buttonUrl,
+              isVisible
+            );
+          }
+
+          return redirect(res, "/admin/main-banner");
         }
 
         // ==================================================
