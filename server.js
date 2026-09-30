@@ -175,6 +175,23 @@ function redirect(res, location) {
 }
 
 
+function isValidPhone(phone) {
+  const value = String(phone || "").trim();
+
+  if (/^\+[0-9]{8,15}$/.test(value)) {
+    return true;
+  }
+
+  const digits = value.replace(/[^0-9]/g, "");
+
+  return (
+    (digits.length === 11 &&
+      (digits.startsWith("7") || digits.startsWith("8"))) ||
+    (digits.length === 12 && digits.startsWith("375"))
+  );
+}
+
+
 function renderPage(
   req,
   title,
@@ -654,6 +671,40 @@ function saveUploadedDocument(file, allowedTypesOverride) {
 }
 
 // ======================================================
+// ОДНОРАЗОВЫЕ ТОКЕНЫ ФОРМ ЗАЯВОК
+// ======================================================
+
+function createRequestToken() {
+  const token = randomBytes(32).toString("hex");
+
+  db.prepare(`
+    INSERT INTO one_click_tokens
+    (
+      token,
+      expires_at
+    )
+    VALUES (?, ?)
+  `).run(
+    token,
+    Date.now() + 10 * 60 * 1000
+  );
+
+  return token;
+}
+
+function consumeRequestToken(token) {
+  if (!token) {
+    return false;
+  }
+
+  return db.prepare(`
+    DELETE FROM one_click_tokens
+    WHERE token = ?
+      AND expires_at > ?
+  `).run(token, Date.now()).changes === 1;
+}
+
+// ======================================================
 // ФОРМА ЗАЯВКИ НА УСЛУГУ / АРЕНДУ ТЕХНИКИ
 // ======================================================
 
@@ -674,6 +725,12 @@ function renderServiceRequestForm(values = {}, errors = {}) {
       action="/service-request"
       enctype="multipart/form-data"
     >
+      <input
+        type="hidden"
+        name="request_token"
+        value="${escapeHtml(values.request_token || createRequestToken())}"
+      >
+
       <p>
         <label>
           Имя:
@@ -703,6 +760,19 @@ function renderServiceRequestForm(values = {}, errors = {}) {
         </label>
 
         ${fieldError("phone")}
+      </p>
+
+      <p>
+        <label>
+          Тип заявки:
+          <select name="type" required>
+            <option value="">Выберите тип заявки</option>
+            <option value="Услуга" ${values.type === "Услуга" ? "selected" : ""}>Услуга</option>
+            <option value="Аренда техники" ${values.type === "Аренда техники" ? "selected" : ""}>Аренда техники</option>
+          </select>
+        </label>
+
+        ${fieldError("type")}
       </p>
 
       <p>
@@ -1082,6 +1152,12 @@ function renderRepairRequestForm(values = {}, errors = {}) {
       action="/repair-request"
       enctype="multipart/form-data"
     >
+      <input
+        type="hidden"
+        name="request_token"
+        value="${escapeHtml(values.request_token || createRequestToken())}"
+      >
+
       <p>
         <label>
           Имя:
@@ -1226,6 +1302,12 @@ function renderCallbackRequestForm(values = {}, errors = {}) {
       method="POST"
       action="/callback-request"
     >
+      <input
+        type="hidden"
+        name="request_token"
+        value="${escapeHtml(values.request_token || createRequestToken())}"
+      >
+
       <p>
         <label>
           Имя:
@@ -4530,21 +4612,8 @@ if (
             );
           }
 
-          const phoneDigits =
-            phone.replace(/[^0-9]/g, "");
-
           const validPhone =
-            (
-              phoneDigits.length === 11 &&
-              (
-                phoneDigits.startsWith("7") ||
-                phoneDigits.startsWith("8")
-              )
-            ) ||
-            (
-              phoneDigits.length === 12 &&
-              phoneDigits.startsWith("375")
-            );
+            isValidPhone(phone);
 
           if (
             params.get("agree") !== "1" ||
@@ -5090,27 +5159,15 @@ return redirect(
              params.get("phone")
                ?.trim() || "";
 
-           const phoneDigits =
-             phone.replace(/[^0-9]/g, "");
-
            const validPhone =
-             (
-               phoneDigits.length === 11 &&
-               (
-                 phoneDigits.startsWith("7") ||
-                 phoneDigits.startsWith("8")
-               )
-             ) ||
-             (
-               phoneDigits.length === 12 &&
-               phoneDigits.startsWith("375")
-             );
+             isValidPhone(phone);
 
-           const formValues = {
-             name,
-             phone,
-             agree: params.get("agree") === "1"
-           };
+            const formValues = {
+              name,
+              phone,
+              request_token: params.get("request_token") || "",
+              agree: params.get("agree") === "1"
+            };
 
            const formErrors = {};
 
@@ -5140,22 +5197,34 @@ return redirect(
                  )
                )
              );
-           }
+            }
 
-           const result =
-             db.prepare(`
-               INSERT INTO orders
-               (
-                 name,
-                 phone,
-                 address,
-                 total,
-                 currency,
-                 created_at,
-                 status,
-                 comment,
-                 type
-               )
+            if (!consumeRequestToken(params.get("request_token"))) {
+              return sendHtml(
+                res,
+                renderPage(
+                  req,
+                  "Заявка уже отправлена",
+                  `<h1>Заявка уже отправлена или форма устарела.</h1>`
+                ),
+                400
+              );
+            }
+
+            const result =
+              db.prepare(`
+                INSERT INTO orders
+                (
+                  name,
+                  phone,
+                  address,
+                  total,
+                  currency,
+                  created_at,
+                  status,
+                  comment,
+                  type
+                )
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              `).run(
                name,
@@ -5297,26 +5366,14 @@ return redirect(
              params.get("problem")
                ?.trim() || "";
 
-           const phoneDigits =
-             phone.replace(/[^0-9]/g, "");
-
            const validPhone =
-             (
-               phoneDigits.length === 11 &&
-               (
-                 phoneDigits.startsWith("7") ||
-                 phoneDigits.startsWith("8")
-               )
-             ) ||
-             (
-               phoneDigits.length === 12 &&
-               phoneDigits.startsWith("375")
-             );
+             isValidPhone(phone);
 
-           const formValues = {
-             name,
-             phone,
-             equipment_type: equipmentType,
+            const formValues = {
+              name,
+              phone,
+              request_token: params.get("request_token") || "",
+              equipment_type: equipmentType,
              equipment_name: equipmentName,
              manufacturer,
              problem,
@@ -5464,20 +5521,32 @@ return redirect(
               }
             }
 
-            const result =
-              db.prepare(`
-                INSERT INTO orders
-                (
-                  name,
-                  phone,
-                  address,
-                  total,
-                  currency,
-                  created_at,
-                  status,
-                  comment,
-                  type,
-                  equipment_type,
+            if (!consumeRequestToken(params.get("request_token"))) {
+              return sendHtml(
+                res,
+                renderPage(
+                  req,
+                  "Заявка уже отправлена",
+                  `<h1>Заявка уже отправлена или форма устарела.</h1>`
+                ),
+                400
+              );
+            }
+
+             const result =
+               db.prepare(`
+                 INSERT INTO orders
+                 (
+                   name,
+                   phone,
+                   address,
+                   total,
+                   currency,
+                   created_at,
+                   status,
+                   comment,
+                   type,
+                   equipment_type,
                   equipment_name,
                   manufacturer,
                   problem,
@@ -5661,13 +5730,16 @@ return redirect(
              params.get("phone")
                ?.trim() || "";
 
-           const serviceName =
-             params.get("service_name")
-               ?.trim() || "";
+            const serviceType =
+              params.get("type")?.trim() || "";
 
-           const requestDate =
-             params.get("request_date")
-               ?.trim() || "";
+            const serviceName =
+              params.get("service_name")
+                ?.trim() || "";
+
+            const requestDate =
+              params.get("request_date")
+                ?.trim() || "";
 
            const desiredTime =
              params.get("desired_time")
@@ -5685,33 +5757,22 @@ return redirect(
              params.get("comment")
                ?.trim() || "";
 
-           const phoneDigits =
-             phone.replace(/[^0-9]/g, "");
-
            const validPhone =
-             (
-               phoneDigits.length === 11 &&
-               (
-                 phoneDigits.startsWith("7") ||
-                 phoneDigits.startsWith("8")
-               )
-             ) ||
-             (
-               phoneDigits.length === 12 &&
-               phoneDigits.startsWith("375")
-             );
+             isValidPhone(phone);
 
-           const formValues = {
-             name,
-             phone,
-             service_name: serviceName,
-             request_date: requestDate,
-             desired_time: desiredTime,
-             address,
-             duration,
-             comment,
-             agree: params.get("agree") === "1"
-           };
+            const formValues = {
+              name,
+              phone,
+              request_token: params.get("request_token") || "",
+              type: serviceType,
+              service_name: serviceName,
+              request_date: requestDate,
+              desired_time: desiredTime,
+              address,
+              duration,
+              comment,
+              agree: params.get("agree") === "1"
+            };
 
            const formErrors = {};
 
@@ -5723,9 +5784,13 @@ return redirect(
              formErrors.phone = "Укажите корректный номер телефона.";
            }
 
-           if (!serviceName) {
-             formErrors.service_name = "Укажите услугу или технику.";
-           }
+            if (!["Услуга", "Аренда техники"].includes(serviceType)) {
+              formErrors.type = "Выберите тип заявки.";
+            }
+
+            if (!serviceName) {
+              formErrors.service_name = "Укажите услугу или технику.";
+            }
 
             if (!requestDate) {
               formErrors.request_date = "Укажите дату.";
@@ -5899,22 +5964,34 @@ return redirect(
                   )
                 );
               }
+             }
+
+            if (!consumeRequestToken(params.get("request_token"))) {
+              return sendHtml(
+                res,
+                renderPage(
+                  req,
+                  "Заявка уже отправлена",
+                  `<h1>Заявка уже отправлена или форма устарела.</h1>`
+                ),
+                400
+              );
             }
 
-           const result =
-             db.prepare(`
-               INSERT INTO orders
-               (
-                 name,
-                 phone,
-                 address,
-                 total,
-                 currency,
-                 created_at,
-                 status,
-                 comment,
-                 type,
-                 service_name,
+            const result =
+              db.prepare(`
+                INSERT INTO orders
+                (
+                  name,
+                  phone,
+                  address,
+                  total,
+                  currency,
+                  created_at,
+                  status,
+                  comment,
+                  type,
+                  service_name,
                  request_date,
                  desired_time,
                  duration,
@@ -5929,9 +6006,9 @@ return redirect(
                "BYN",
                new Date().toISOString(),
                "Новая",
-               comment,
-               "Услуга",
-               serviceName,
+                comment,
+                serviceType,
+                serviceName,
                requestDate,
                desiredTime,
                duration,
@@ -5954,7 +6031,7 @@ return redirect(
               try {
                 const mailTextLines = [
                   `Номер заявки: №${orderId}`,
-                  "Тип: Услуга",
+                  `Тип: ${serviceType}`,
                   `Имя: ${name}`,
                   `Телефон: ${phone}`,
                   `Услуга/техника: ${serviceName}`,
@@ -6545,21 +6622,8 @@ if (isValidPhone(phone)) {
              params.get("phone")
                ?.trim() || "";
 
-           const phoneDigits =
-             phone.replace(/[^0-9]/g, "");
-
            const validPhone =
-             (
-               phoneDigits.length === 11 &&
-               (
-                 phoneDigits.startsWith("7") ||
-                 phoneDigits.startsWith("8")
-               )
-             ) ||
-             (
-               phoneDigits.length === 12 &&
-               phoneDigits.startsWith("375")
-             );
+             isValidPhone(phone);
 
            const address =
              params.get("address")
@@ -6736,34 +6800,34 @@ if (isValidPhone(phone)) {
             );
            }
 
-           const ordersEmail =
-             db.prepare(`
-               SELECT value
-               FROM site_settings
-               WHERE key = ?
-             `).get("orders_email")?.value?.trim();
+            const customerEmail =
+              params.get("email")?.trim() || "";
 
-           if (ordersEmail) {
-             const customerEmail =
-               params.get("email")?.trim() || "";
+            const payment =
+              params.get("payment") || "";
 
-             const payment =
-               params.get("payment") || "";
+            const delivery =
+              params.get("delivery") || "";
 
-             const delivery =
-               params.get("delivery") || "";
+            const orderComment =
+              params.get("comment")?.trim() || "";
 
-             const orderComment =
-               params.get("comment")?.trim() || "";
+            const itemsText =
+              items
+                .map(item =>
+                  `${item.name} — ${item.quantity} шт. × ${item.price_on_request ? "По запросу" : `${item.price} ${item.currency}`}`
+                )
+                .join("\n");
 
-             const itemsText =
-               items
-                 .map(item =>
-                   `${item.name} — ${item.quantity} шт. × ${item.price_on_request ? "По запросу" : `${item.price} ${item.currency}`}`
-                 )
-                 .join("\n");
+            const ordersEmail =
+              db.prepare(`
+                SELECT value
+                FROM site_settings
+                WHERE key = ?
+              `).get("orders_email")?.value?.trim();
 
-             try {
+            if (ordersEmail) {
+              try {
                await mailTransporter.sendMail({
                  from: process.env.SMTP_USER,
                  to: ordersEmail,
@@ -6789,11 +6853,36 @@ if (isValidPhone(phone)) {
                  error?.message || error
                );
              }
-           }
+            }
+
+            if (customerEmail) {
+              try {
+                await mailTransporter.sendMail({
+                  from: process.env.SMTP_USER,
+                  to: customerEmail,
+                  subject: `Ваш заказ №${orderId}`,
+                  text: [
+                    `Номер заказа: №${orderId}`,
+                    "Тип: Заказ товара",
+                    "Товары:",
+                    itemsText,
+                    `Общая сумма: ${total} ${currency}`,
+                    `Способ получения: ${delivery === "delivery" ? "Доставка" : delivery}`,
+                    `Способ оплаты: ${payment === "card" ? "Банковская карта" : payment}`,
+                    `Комментарий: ${orderComment || "нет"}`
+                  ].join("\n")
+                });
+              } catch (error) {
+                console.error(
+                  "Ошибка отправки email клиенту:",
+                  error?.message || error
+                );
+              }
+            }
 
 
-           setCart(
-             res,
+            setCart(
+              res,
              {}
            );
 
@@ -6968,6 +7057,20 @@ if (isValidPhone(phone)) {
                     ${filterType === "Обратный звонок" ? "selected" : ""}
                   >
                     Обратный звонок
+                  </option>
+
+                  <option
+                    value="Услуга"
+                    ${filterType === "Услуга" ? "selected" : ""}
+                  >
+                    Услуга
+                  </option>
+
+                  <option
+                    value="Аренда техники"
+                    ${filterType === "Аренда техники" ? "selected" : ""}
+                  >
+                    Аренда техники
                   </option>
                 </select>
 
@@ -7248,7 +7351,7 @@ if (isValidPhone(phone)) {
                   </p>
 
                   ${
-                    order.type === "Услуга"
+                    ["Услуга", "Аренда техники"].includes(order.type)
                       ? `
                         <p>
                           Услуга/техника:
@@ -8027,6 +8130,14 @@ for (
                     Сохранить
                   </button>
 
+                  <button
+                    name="preview"
+                    value="1"
+                    formtarget="_blank"
+                  >
+                    Предпросмотр
+                  </button>
+
                 </form>
 
                 ${renderCharacteristicSelectionScript()}
@@ -8469,7 +8580,9 @@ const recommendedIds =
 
           return redirect(
             res,
-            "/catalog"
+            params.get("preview") === "1"
+              ? `/product/${productId}`
+              : "/catalog"
           );
         }
 
@@ -9447,6 +9560,14 @@ value="${sortOrderValue ?? product.sort_order}"
                     Сохранить
                   </button>
 
+                  <button
+                    name="preview"
+                    value="1"
+                    formtarget="_blank"
+                  >
+                    Предпросмотр
+                  </button>
+
                 </form>
 
                 ${renderCharacteristicSelectionScript()}
@@ -9828,7 +9949,12 @@ if (sortOrder < 1) {
     );
   }
 
-  return redirect(res, "/catalog");
+  return redirect(
+    res,
+    params.get("preview") === "1"
+      ? `/product/${id}`
+      : "/catalog"
+  );
 }
 
         // ==================================================
