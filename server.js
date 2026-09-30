@@ -2531,6 +2531,12 @@ if (
                      </a>
                    </li>
 
+                   <li>
+                     <a href="/admin/services">
+                       Услуги
+                     </a>
+                   </li>
+
                   </ul>
               `
             )
@@ -10553,6 +10559,333 @@ if (
     "/admin/deleted-products"
   );
 }
+
+        // ==================================================
+        // УСЛУГИ — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/services"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const services = db.prepare(`
+            SELECT *
+            FROM services
+            ORDER BY sort_order, id
+          `).all();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Услуги",
+              `
+                <h1>Управление услугами</h1>
+
+                <p>
+                  <a href="/admin">← Назад в админ-панель</a>
+                </p>
+
+                <h2>Добавить услугу</h2>
+
+                <form method="POST" action="/admin/services" enctype="multipart/form-data">
+                  <p>
+                    Название:
+                    <input type="text" name="name" required>
+                  </p>
+
+                  <p>
+                    Краткое описание:
+                    <textarea name="short_description"></textarea>
+                  </p>
+
+                  <p>
+                    Полное описание:
+                    <textarea name="description"></textarea>
+                  </p>
+
+                  <p>
+                    Изображение:
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                  </p>
+
+                  <p>
+                    Порядок отображения:
+                    <input type="number" name="sort_order" value="0">
+                  </p>
+
+                  <button type="submit">Добавить услугу</button>
+                </form>
+
+                <h2>Услуги</h2>
+
+                <ul>
+                  ${services.map(service => `
+                    <li>
+                      <strong>${escapeHtml(service.name)}</strong>
+                      — ${service.is_visible ? "показывается" : "скрыта"}
+                      — порядок: ${service.sort_order}
+
+                      <a href="/admin/services/edit/${service.id}">
+                        Редактировать
+                      </a>
+
+                      <a href="/admin/services/toggle/${service.id}">
+                        ${service.is_visible ? "Скрыть" : "Показать"}
+                      </a>
+
+                      <a
+                        href="/admin/services/delete/${service.id}"
+                        onclick="return confirm('Удалить услугу?')"
+                      >
+                        Удалить
+                      </a>
+                    </li>
+                  `).join("")}
+                </ul>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // УСЛУГИ — POST CREATE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path === "/admin/services"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const contentType = req.headers["content-type"] || "";
+          const params = await parseMultipartBody(req, contentType);
+          const name = params.get("name")?.trim() || "";
+          const shortDescription = params.get("short_description")?.trim() || "";
+          const description = params.get("description")?.trim() || "";
+          const sortOrder = Number(params.get("sort_order") || 0);
+          const imageFile = params.getFile("image");
+
+          if (
+            !name ||
+            !Number.isInteger(sortOrder) ||
+            sortOrder < 0 ||
+            !description
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Заполните название, полное описание и корректный порядок.</h1>`
+              ),
+              400
+            );
+          }
+
+          let image = "";
+          try {
+            image = imageFile ? saveUploadedImage(imageFile) : "";
+          } catch (error) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              400
+            );
+          }
+
+          db.prepare(`
+            INSERT INTO services
+            (name, short_description, description, image, sort_order, is_visible)
+            VALUES (?, ?, ?, ?, ?, 1)
+          `).run(name, shortDescription, description, image, sortOrder);
+
+          return redirect(res, "/admin/services");
+        }
+
+        // ==================================================
+        // УСЛУГИ — EDIT GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/services\/edit\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const service = db.prepare("SELECT * FROM services WHERE id = ?").get(id);
+
+          if (!service) {
+            return sendHtml(res, renderPage(req, "Ошибка", `<h1>Услуга не найдена.</h1>`), 404);
+          }
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Редактирование услуги",
+              `
+                <h1>Редактирование услуги</h1>
+
+                <form method="POST" action="/admin/services/edit/${id}" enctype="multipart/form-data">
+                  <p>
+                    Название:
+                    <input type="text" name="name" value="${escapeHtml(service.name)}" required>
+                  </p>
+
+                  <p>
+                    Краткое описание:
+                    <textarea name="short_description">${escapeHtml(service.short_description)}</textarea>
+                  </p>
+
+                  <p>
+                    Полное описание:
+                    <textarea name="description" required>${escapeHtml(service.description)}</textarea>
+                  </p>
+
+                  <p>
+                    Изображение:
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    ${service.image ? `<br><img src="${escapeHtml(service.image)}" alt="${escapeHtml(service.name)}" width="150">` : ""}
+                  </p>
+
+                  <p>
+                    Порядок отображения:
+                    <input type="number" name="sort_order" value="${service.sort_order}">
+                  </p>
+
+                  <button type="submit">Сохранить</button>
+                </form>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // УСЛУГИ — EDIT POST
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/admin\/services\/edit\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const service = db.prepare("SELECT * FROM services WHERE id = ?").get(id);
+
+          if (!service) {
+            return sendHtml(res, renderPage(req, "Ошибка", `<h1>Услуга не найдена.</h1>`), 404);
+          }
+
+          const contentType = req.headers["content-type"] || "";
+          const params = await parseMultipartBody(req, contentType);
+          const name = params.get("name")?.trim() || "";
+          const shortDescription = params.get("short_description")?.trim() || "";
+          const description = params.get("description")?.trim() || "";
+          const sortOrder = Number(params.get("sort_order") || 0);
+          const imageFile = params.getFile("image");
+
+          if (
+            !name ||
+            !Number.isInteger(sortOrder) ||
+            sortOrder < 0 ||
+            !description
+          ) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Ошибка",
+                `<h1>Заполните название, полное описание и корректный порядок.</h1>`
+              ),
+              400
+            );
+          }
+
+          let image = service.image;
+          try {
+            if (imageFile) {
+              image = saveUploadedImage(imageFile);
+            }
+          } catch (error) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              400
+            );
+          }
+
+          db.prepare(`
+            UPDATE services
+            SET name = ?, short_description = ?, description = ?, image = ?, sort_order = ?
+            WHERE id = ?
+          `).run(name, shortDescription, description, image, sortOrder, id);
+
+          return redirect(res, "/admin/services");
+        }
+
+        // ==================================================
+        // УСЛУГИ — TOGGLE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/services\/toggle\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          db.prepare(`
+            UPDATE services
+            SET is_visible = CASE is_visible WHEN 1 THEN 0 ELSE 1 END
+            WHERE id = ?
+          `).run(id);
+
+          return redirect(res, "/admin/services");
+        }
+
+        // ==================================================
+        // УСЛУГИ — DELETE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/services\/delete\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const service = db.prepare("SELECT image FROM services WHERE id = ?").get(id);
+
+          if (service?.image) {
+            await fs.unlink(pathModule.join(UPLOADS_DIR, pathModule.basename(service.image))).catch(() => {});
+          }
+
+          db.prepare("DELETE FROM services WHERE id = ?").run(id);
+          return redirect(res, "/admin/services");
+        }
 
         // ==================================================
         // КАТЕГОРИИ — GET
