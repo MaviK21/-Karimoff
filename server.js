@@ -4,6 +4,7 @@ dotenv.config({ path: ".env" });
 import { createServer } from "http";
 import { randomBytes } from "crypto";
 import nodemailer from "nodemailer";
+import Busboy from "busboy";
 import db from "./lib/db.js";
 
 import pathModule from "path";
@@ -302,127 +303,93 @@ function readRawBody(req) {
   });
 }
 
-function parseMultipartBody(buffer, contentType) {
+function parseMultipartBody(req, contentType) {
+  return new Promise((resolve, reject) => {
+    let parser;
 
-  const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-
-  if (!match) {
-    throw new Error("Не найден boundary multipart/form-data");
-  }
-
-  const boundary = match[1] || match[2];
-
-  const body = buffer.toString("latin1");
-  const delimiter = `--${boundary}`;
-
-  const parts = body.split(delimiter);
-
-  const fields = new Map();
-  const files = new Map();
-
-  for (let part of parts) {
-
-    if (!part) {
-      continue;
+    try {
+      parser = Busboy({
+        headers: {
+          "content-type": contentType
+        }
+      });
+    } catch (error) {
+      reject(error);
+      return;
     }
 
-    // Финальный маркер --boundary-- после split даёт часть, начинающуюся с "--".
-    if (part.startsWith("--")) {
-      continue;
-    }
+    const fields = new Map();
+    const files = new Map();
+    const filePromises = [];
 
-    // Точные границы multipart-части: \r\n перед заголовками и \r\n после данных.
-    // trim() здесь недопустим: он отрезает пробельные байты от бинарных данных файлов.
-    if (part.startsWith("\r\n")) {
-      part = part.slice(2);
-    }
-
-    if (part.endsWith("\r\n")) {
-      part = part.slice(0, -2);
-    }
-
-    const separatorIndex = part.indexOf("\r\n\r\n");
-
-    if (separatorIndex === -1) {
-      continue;
-    }
-
-    const headersText =
-      part.slice(0, separatorIndex);
-
-    const contentText =
-      part.slice(separatorIndex + 4);
-
-    const dispositionMatch =
-      headersText.match(
-    /Content-Disposition:\s*form-data;\s*name="([^"]+)"(?:;\s*filename="([^"]*)")?/i
-  );
-
-    if (!dispositionMatch) {
-      continue;
-    }
-
-    const name = dispositionMatch[1];
-    const filename = dispositionMatch[2];
-
-    if (filename !== undefined) {
-      const contentTypeMatch =
-        headersText.match(
-          /Content-Type:\s*([^\r\n]+)/i
-        );
-
-      const file = {
-        filename,
-        contentType:
-          contentTypeMatch
-            ? contentTypeMatch[1].trim()
-            : "application/octet-stream",
-        data: Buffer.from(
-          contentText,
-          "latin1"
-        )
-      };
-
-      if (!files.has(name)) {
-        files.set(name, []);
+    parser.on("field", (name, value) => {
+      if (!fields.has(name)) {
+        fields.set(name, []);
       }
 
-      files.get(name).push(file);
+      fields.get(name).push(value);
+    });
 
-      continue;
-    }
+    parser.on("file", (name, file, info) => {
+      const chunks = [];
 
-    const value =
-  Buffer.from(
-    contentText.replace(/\r\n$/, ""),
-    "latin1"
-  ).toString("utf8");
+      const filePromise = new Promise((resolveFile, rejectFile) => {
+        file.on("data", chunk => {
+          chunks.push(chunk);
+        });
 
-if (!fields.has(name)) {
-  fields.set(name, []);
-}
+        file.on("end", () => {
+          const fileData = {
+            filename: info.filename,
+            contentType: info.mimeType || "application/octet-stream",
+            data: Buffer.concat(chunks)
+          };
 
-fields.get(name).push(value);
-  }
+          if (!files.has(name)) {
+            files.set(name, []);
+          }
 
-  return {
-    get(name) {
-  const values = fields.get(name) || [];
-  return values[0] || "";
-},
+          files.get(name).push(fileData);
+          resolveFile();
+        });
 
-getAll(name) {
-  return fields.get(name) || [];
-},
+        file.on("error", rejectFile);
+      });
 
-    getFile(name) {
-      return files.get(name)?.[0] || null;
-    },
+      filePromises.push(filePromise);
+    });
 
-    getAllFiles(name) {
-      return files.get(name) || [];
-    }
-  };
+    parser.on("error", reject);
+
+    parser.on("finish", async () => {
+      try {
+        await Promise.all(filePromises);
+
+        resolve({
+          get(name) {
+            const values = fields.get(name) || [];
+            return values[0] || "";
+          },
+
+          getAll(name) {
+            return fields.get(name) || [];
+          },
+
+          getFile(name) {
+            return files.get(name)?.[0] || null;
+          },
+
+          getAllFiles(name) {
+            return files.get(name) || [];
+          }
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+
+    req.pipe(parser);
+  });
 }
 
 function saveUploadedImage(file, allowedTypesOverride) {
@@ -5339,14 +5306,11 @@ return redirect(
            const contentType =
              req.headers["content-type"] || "";
 
-           const rawBody =
-             await readRawBody(req);
-
-           const params =
-             parseMultipartBody(
-               rawBody,
-               contentType
-             );
+            const params =
+              await parseMultipartBody(
+                req,
+                contentType
+              );
 
            const name =
              params.get("name")
@@ -5719,14 +5683,11 @@ return redirect(
            const contentType =
              req.headers["content-type"] || "";
 
-           const rawBody =
-             await readRawBody(req);
-
-           const params =
-             parseMultipartBody(
-               rawBody,
-               contentType
-             );
+            const params =
+              await parseMultipartBody(
+                req,
+                contentType
+              );
 
            const name =
              params.get("name")
@@ -8176,12 +8137,9 @@ for (
           const contentType =
   req.headers["content-type"] || "";
 
-const rawBody =
-  await readRawBody(req);
-
 const params =
-  parseMultipartBody(
-    rawBody,
+  await parseMultipartBody(
+    req,
     contentType
   );
 
@@ -9597,8 +9555,7 @@ if (
   const id = Number(path.split("/")[2]);
 
   const contentType = req.headers["content-type"] || "";
-  const rawBody = await readRawBody(req);
-  const params = parseMultipartBody(rawBody, contentType);
+  const params = await parseMultipartBody(req, contentType);
 
   const existingProduct =
     db.prepare(`
