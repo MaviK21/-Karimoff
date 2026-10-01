@@ -584,6 +584,8 @@ function renderMenu(req) {
       <a href="/favorites">Избранное</a> |
       <a href="/cart">Корзина</a> |
       <a href="/about">О нас</a> |
+      <a href="/news">Новости</a> |
+      <a href="/projects">Проекты</a> |
       <a href="/service-request">Услуги / аренда</a> |
       <a href="/admin">Админ</a>
     </nav>
@@ -2965,6 +2967,99 @@ if (
                     </ul>
                   `
                   : "<p>Опубликованных услуг пока нет.</p>"}
+              `
+            )
+          );
+        }
+
+        if (
+          req.method === "GET" &&
+          path === "/news"
+        ) {
+          const news = db.prepare(`
+            SELECT title, short_text, image
+            FROM news
+            WHERE is_visible = 1
+              AND deleted = 0
+            ORDER BY sort_order, id
+          `).all();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Новости",
+              `
+                <h1>Новости</h1>
+                ${news.length > 0
+                  ? `
+                    <ul>
+                      ${news.map(item => `
+                        <li>
+                          <h2>${escapeHtml(item.title)}</h2>
+                          ${item.image
+                            ? `
+                              <p>
+                                <img
+                                  src="${escapeHtml(item.image)}"
+                                  alt="${escapeHtml(item.title)}"
+                                  style="max-width:200px; max-height:200px;"
+                                >
+                              </p>
+                            `
+                            : ""}
+                          <p>${escapeHtml(item.short_text || "")}</p>
+                        </li>
+                      `).join("")}
+                    </ul>
+                  `
+                  : "<p>Опубликованных новостей пока нет.</p>"}
+              `
+            )
+          );
+        }
+
+        if (
+          req.method === "GET" &&
+          path === "/projects"
+        ) {
+          const projects = db.prepare(`
+            SELECT name, description, image
+            FROM projects
+            WHERE is_visible = 1
+            ORDER BY sort_order, id
+          `).all();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Проекты",
+              `
+                <h1>Проекты</h1>
+                ${projects.length > 0
+                  ? `
+                    <ul>
+                      ${projects.map(project => `
+                        <li>
+                          <h2>${escapeHtml(project.name)}</h2>
+                          ${project.image
+                            ? `
+                              <p>
+                                <img
+                                  src="${escapeHtml(project.image)}"
+                                  alt="${escapeHtml(project.name)}"
+                                  style="max-width:200px; max-height:200px;"
+                                >
+                              </p>
+                            `
+                            : ""}
+                          <p>${escapeHtml(project.description || "")}</p>
+                        </li>
+                      `).join("")}
+                    </ul>
+                  `
+                  : "<p>Опубликованных проектов пока нет.</p>"}
               `
             )
           );
