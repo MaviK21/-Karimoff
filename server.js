@@ -423,40 +423,6 @@ function renderPage(
 
   const mobileNavigation = publicPage
     ? `
-      <style>
-        @media (max-width: 640px) {
-          body {
-            padding-bottom: calc(68px + env(safe-area-inset-bottom));
-          }
-
-          .mobile-bottom-nav {
-            position: fixed;
-            right: 0;
-            bottom: 0;
-            left: 0;
-            z-index: 1100;
-            display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            padding: 8px 4px calc(8px + env(safe-area-inset-bottom));
-            border-top: 1px solid #d8d8d8;
-            background: #fff;
-            text-align: center;
-            box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.08);
-          }
-
-          .mobile-bottom-nav a {
-            color: inherit;
-            font-size: 12px;
-            text-decoration: none;
-          }
-        }
-
-        @media (min-width: 641px) {
-          .mobile-bottom-nav {
-            display: none;
-          }
-        }
-      </style>
       <nav class="mobile-bottom-nav" aria-label="Мобильная навигация">
         <a href="/">Главная</a>
         <a href="/catalog">Каталог</a>
@@ -466,6 +432,7 @@ function renderPage(
       </nav>
     `
     : "";
+
 
   const backToTop =
     !pathname.startsWith("/admin") && !isAdmin(req)
@@ -505,9 +472,11 @@ function renderPage(
   >
 
   <title>${escapeHtml(title)}</title>
+
+${publicPage ? '<link rel="stylesheet" href="/public/css/style.css">' : ""}
 </head>
 
-<body>
+<body class="${publicPage ? "public-page " : ""}${pathname === "/" ? "home-page" : pathname === "/catalog" ? "catalog-page" : pathname === "/services" ? "services-page" : /^\/product\/\d+$/.test(pathname) ? "product-page" : ""}">
 
 ${renderMenu(req)}
 
@@ -570,7 +539,7 @@ function renderMenu(req) {
   };
 
   return `
-    <nav>
+    <nav class="public-site-nav">
       <a href="/">Главная</a> |
       <a href="/catalog">Каталог</a> |
       <details style="display:inline-block;">
@@ -586,8 +555,8 @@ function renderMenu(req) {
       <a href="/about">О нас</a> |
       <a href="/news">Новости</a> |
       <a href="/projects">Проекты</a> |
-      <a href="/service-request">Услуги / аренда</a> |
-      <a href="/admin">Админ</a>
+      <a href="/service-request">Услуги / аренда</a>
+
     </nav>
 
     <hr>
@@ -2481,6 +2450,23 @@ const server =
         const path =
           url.pathname;
 
+        if (
+          req.method === "GET" &&
+          path === "/public/css/style.css"
+        ) {
+          try {
+            const stylesheet = await fs.readFile(
+              pathModule.join(__dirname, "public", "css", "style.css")
+            );
+            res.writeHead(200, {
+              "Content-Type": "text/css; charset=utf-8"
+            });
+            return res.end(stylesheet);
+          } catch {
+            return sendHtml(res, "Файл не найден", 404);
+          }
+        }
+
           if (
   req.method === "GET" &&
   path.startsWith("/uploads/")
@@ -2943,6 +2929,7 @@ if (
               req,
               "Услуги",
               `
+
                 <h1>Услуги</h1>
                 ${services.length > 0
                   ? `
@@ -4616,32 +4603,6 @@ ${catalogStateHiddenHtml.replace(
 
 </form>
 
-<style>
-  @media (max-width: 640px) {
-    #catalog-filters[open] {
-      position: fixed;
-      right: 0;
-      bottom: 0;
-      left: 0;
-      z-index: 1200;
-      box-sizing: border-box;
-      max-height: 85vh;
-      overflow-y: auto;
-      padding: 16px;
-      border-radius: 16px 16px 0 0;
-      background: #fff;
-      box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.2);
-    }
-
-    #catalog-filters[open] > summary {
-      position: sticky;
-      top: -16px;
-      z-index: 1;
-      padding: 12px 0;
-      background: #fff;
-    }
-  }
-</style>
 
 <details id="catalog-filters">
   <summary>Фильтры</summary>
@@ -4808,7 +4769,7 @@ ${catalogStateHiddenHtml.replace(
 
 </details>
 
-        <p>
+        <p class="catalog-category-links">
           ${categoryLinks}
         </p>
 
@@ -5146,8 +5107,8 @@ if (
   let characteristicsHtml = "";
 
   for (const characteristic of characteristics) {
-    characteristicsHtml += `
-      <p>
+      characteristicsHtml += `
+      <p class="product-characteristic">
         <strong>
           ${escapeHtml(characteristic.name)}:
         </strong>
@@ -5175,7 +5136,7 @@ if (
         Галерея
       </h2>
 
-      <div>
+      <div class="product-gallery">
     `;
 
     for (const galleryImage of galleryImages) {
@@ -5376,7 +5337,7 @@ if (
 
         ${documentHtml}
 
-        <p>
+        <p class="product-price">
           <strong>
             ${
   product.price_on_request
@@ -5431,13 +5392,13 @@ if (
           ${escapeHtml(names.join(", ") || "—")}
         </p>
 
-        <p>
+        <p class="product-actions">
   <a href="/buy-one-click?product_id=${id}">
     Купить в 1 клик
   </a>
 </p>
 
-        <p>
+        <p class="product-actions">
           <a href="/cart/add/${id}">
             В корзину
           </a>
@@ -5457,39 +5418,7 @@ if (
             : ""
         }
 
-        <style>
-          @media (max-width: 640px) {
-            .product-main-image,
-            .product-gallery-image {
-              cursor: zoom-in;
-            }
 
-            .product-image-zoom {
-              position: fixed;
-              inset: 0;
-              z-index: 2000;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              padding: 16px;
-              background: rgba(0, 0, 0, 0.92);
-            }
-
-            .product-image-zoom img {
-              max-width: 100%;
-              max-height: 100%;
-              object-fit: contain;
-            }
-
-            .product-image-zoom button {
-              position: absolute;
-              top: 12px;
-              right: 12px;
-              padding: 8px 12px;
-              font-size: 18px;
-            }
-          }
-        </style>
         <script>
           (() => {
             if (!window.matchMedia("(max-width: 640px)").matches) {
