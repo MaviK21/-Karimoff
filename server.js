@@ -2390,6 +2390,25 @@ if (
             LIMIT 1
           `).get();
 
+          const recommendedProducts = db.prepare(`
+            SELECT
+              p.id,
+              p.name,
+              p.image,
+              p.price,
+              p.currency,
+              p.discount_percent,
+              p.price_on_request,
+              MIN(pr.sort_order) AS recommendation_order,
+              MIN(pr.id) AS recommendation_id
+            FROM product_recommendations pr
+            JOIN products p
+              ON p.id = pr.recommended_product_id
+            WHERE p.deleted = 0
+            GROUP BY p.id
+            ORDER BY recommendation_order, recommendation_id
+          `).all();
+
           return sendHtml(
             res,
             renderPage(
@@ -2535,6 +2554,54 @@ if (
                             </p>
                           </li>
                         `).join("")}
+                      </ul>
+                    `
+                    : ""
+                }
+
+                ${
+                  recommendedProducts.length > 0
+                    ? `
+                      <h2>Рекомендуемые товары</h2>
+                      <ul>
+                        ${recommendedProducts.map(product => {
+                          const discountPercent = Number(product.discount_percent) || 0;
+                          const discountedPrice = discountPercent > 0
+                            ? product.price * (1 - discountPercent / 100)
+                            : product.price;
+
+                          return `
+                            <li>
+                              ${
+                                product.image
+                                  ? `
+                                    <p>
+                                      <img
+                                        src="${escapeHtml(product.image)}"
+                                        alt="${escapeHtml(product.name)}"
+                                        style="max-width:200px; max-height:200px;"
+                                      >
+                                    </p>
+                                  `
+                                  : ""
+                              }
+                              <p>
+                                <a href="/product/${product.id}">
+                                  <strong>${escapeHtml(product.name)}</strong>
+                                </a>
+                              </p>
+                              <p>
+                                ${
+                                  product.price_on_request
+                                    ? "Цена по запросу"
+                                    : discountPercent > 0
+                                      ? `<s>${product.price} ${escapeHtml(product.currency || "BYN")}</s> → ${discountedPrice} ${escapeHtml(product.currency || "BYN")}`
+                                      : `${product.price} ${escapeHtml(product.currency || "BYN")}`
+                                }
+                              </p>
+                            </li>
+                          `;
+                        }).join("")}
                       </ul>
                     `
                     : ""
