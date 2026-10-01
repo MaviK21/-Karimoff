@@ -373,6 +373,32 @@ function renderPage(
     `;
   }
 
+  const backToTop =
+    !pathname.startsWith("/admin") && !isAdmin(req)
+      ? `
+        <button
+          id="back-to-top"
+          type="button"
+          aria-label="Наверх"
+          style="display:none; position:fixed; right:24px; bottom:24px; z-index:1000; cursor:pointer;"
+        >Наверх</button>
+        <script>
+          (() => {
+            const button = document.getElementById("back-to-top");
+            const updateVisibility = () => {
+              button.style.display = window.scrollY > 300 ? "block" : "none";
+            };
+
+            window.addEventListener("scroll", updateVisibility, { passive: true });
+            button.addEventListener("click", () => {
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            });
+            updateVisibility();
+          })();
+        </script>
+      `
+      : "";
+
   return `
 <!DOCTYPE html>
 <html lang="ru">
@@ -394,6 +420,8 @@ ${renderMenu(req)}
 ${breadcrumbs}
 
 ${content}
+
+${backToTop}
 
 </body>
 </html>
