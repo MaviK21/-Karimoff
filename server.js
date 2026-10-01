@@ -2382,12 +2382,49 @@ if (
             ORDER BY sort_order, id
           `).all();
 
+          const mainBanner = db.prepare(`
+            SELECT title, description, image, button_text, button_url
+            FROM main_banners
+            WHERE is_visible = 1
+            ORDER BY id
+            LIMIT 1
+          `).get();
+
           return sendHtml(
             res,
             renderPage(
               req,
               "Karimoff",
               `
+                ${
+                  mainBanner
+                    ? `
+                      <section>
+                        ${
+                          mainBanner.image
+                            ? `
+                              <p>
+                                <img
+                                  src="${escapeHtml(mainBanner.image)}"
+                                  alt="${escapeHtml(mainBanner.title)}"
+                                  style="max-width:100%; max-height:400px;"
+                                >
+                              </p>
+                            `
+                            : ""
+                        }
+                        <h1>${escapeHtml(mainBanner.title)}</h1>
+                        <p>${escapeHtml(mainBanner.description)}</p>
+                        <p>
+                          <a href="${escapeHtml(mainBanner.button_url)}">
+                            ${escapeHtml(mainBanner.button_text)}
+                          </a>
+                        </p>
+                      </section>
+                    `
+                    : ""
+                }
+
                 <h1>Karimoff</h1>
 
                 <p>
