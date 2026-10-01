@@ -483,7 +483,7 @@ ${publicPage ? '<link rel="stylesheet" href="/public/css/style.css">' : ""}
 ${adminLoginPage || adminPanelPage ? '<link rel="stylesheet" href="/public/css/admin.css">' : ""}
 </head>
 
-<body class="${adminLoginPage ? "admin-login-page " : ""}${adminPanelPage ? "admin-panel-page " : ""}${publicPage ? "public-page " : ""}${pathname === "/" ? "home-page" : pathname === "/catalog" ? "catalog-page" : pathname === "/services" ? "services-page" : /^\/product\/\d+$/.test(pathname) ? "product-page" : ""}">
+<body class="${adminLoginPage ? "admin-login-page " : ""}${adminPanelPage ? "admin-panel-page " : ""}${publicPage ? "public-page " : ""}${pathname === "/" ? "home-page" : pathname === "/catalog" ? "catalog-page" : pathname === "/services" ? "services-page" : pathname === "/news" ? "news-page" : pathname === "/projects" ? "projects-page" : /^\/product\/\d+$/.test(pathname) ? "product-page" : ""}">
 
 ${renderMenu(req)}
 
@@ -4381,35 +4381,34 @@ if (selectedCharacteristicIds.length > 0) {
   });
 }
 
-  let categoryLinks = `
-    <a href="/catalog">
-      Все категории
-    </a>
-  `;
+  const renderCatalogCategories = (parentId = null) => {
+    const categories = cats
+      .filter(category => !category.hidden && category.parent_id === parentId)
+      .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
 
-  for (
-    const category
-    of cats
-  ) {
-
-    if (category.hidden) {
-      continue;
+    if (categories.length === 0) {
+      return "";
     }
 
-    if (
-  (categoryProductCounts.get(category.id) || 0) === 0
-) {
-  continue;
-}
-
-    categoryLinks += `
-      |
-      <a href="/catalog?category=${category.id}">
-        ${escapeHtml(category.name)}
-(${categoryProductCounts.get(category.id) || 0})
-      </a>
+    return `
+      <ul>
+        ${categories.map(category => `
+          <li>
+            <a href="/catalog?category=${category.id}">
+              ${escapeHtml(category.name)} (${categoryProductCounts.get(category.id) || 0})
+            </a>
+            ${renderCatalogCategories(category.id)}
+          </li>
+        `).join("")}
+      </ul>
     `;
-  }
+  };
+
+  const categoryLinks = `
+    <a href="/catalog">Все категории</a>
+    ${renderCatalogCategories()}
+  `;
+
 
   let productsHtml = "";
 
@@ -4576,6 +4575,25 @@ product.availability === "in_stock"
         <h1>
           Каталог товаров
         </h1>
+
+        ${isAdmin(req) ? `
+          <div class="admin-catalog-toolbar">
+            <form method="GET" action="/catalog" class="admin-catalog-search">
+              <input
+                type="search"
+                name="search"
+                value="${escapeHtml(searchQuery)}"
+                placeholder="Поиск товара"
+                aria-label="Поиск товаров"
+              >
+              <button type="submit">Найти</button>
+              <div
+                id="search-suggestions"
+                style="display:none; position:absolute; top:100%; left:0; z-index:1000; background:white; border:1px solid #ccc; width:100%; box-sizing:border-box;"
+              ></div>
+            </form>
+          </div>
+        ` : ""}
 
         <p>
           Найдено товаров: ${products.length}
@@ -4756,8 +4774,10 @@ product.availability === "in_stock"
 
 <script>
   const catalogFilters = document.getElementById("catalog-filters");
+  const adminCatalogToolbar = document.querySelector(".admin-catalog-toolbar");
   const publicSiteNav = document.querySelector("body.catalog-page > .public-site-nav");
-  const headerSearchForm = publicSiteNav?.querySelector('form[action="/catalog"]');
+  const headerSearchForm = adminCatalogToolbar?.querySelector('form[action="/catalog"]')
+    || publicSiteNav?.querySelector('form[action="/catalog"]');
 
   if (catalogFilters && headerSearchForm) {
     headerSearchForm.after(catalogFilters);
