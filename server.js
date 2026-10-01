@@ -10768,6 +10768,12 @@ if (
             WHERE deleted = 1
             ORDER BY sort_order, id
           `).all();
+          const deletedNews = db.prepare(`
+            SELECT id, title, sort_order
+            FROM news
+            WHERE deleted = 1
+            ORDER BY sort_order, id
+          `).all();
 
           return sendHtml(
             res,
@@ -10794,6 +10800,23 @@ if (
                     `
                     : "<p>Удалённых услуг нет.</p>"
                 }
+                <h2>Удалённые новости</h2>
+                ${
+                  deletedNews.length
+                    ? `
+                      <ul>
+                        ${deletedNews.map(item => `
+                          <li>
+                            <strong>${escapeHtml(item.title)}</strong>
+                            <form method="POST" action="/admin/deleted-materials/restore-news/${item.id}" style="display:inline">
+                              <button type="submit">Восстановить</button>
+                            </form>
+                          </li>
+                        `).join("")}
+                      </ul>
+                    `
+                    : "<p>Удалённых новостей нет.</p>"
+                }
               `
             )
           );
@@ -10815,6 +10838,29 @@ if (
           const id = Number(path.split("/")[4]);
           db.prepare(`
             UPDATE services
+            SET deleted = 0, is_visible = 1
+            WHERE id = ? AND deleted = 1
+          `).run(id);
+
+          return redirect(res, "/admin/deleted-materials");
+        }
+
+        // ==================================================
+        // ВОССТАНОВИТЬ НОВОСТЬ
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/admin\/deleted-materials\/restore-news\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          db.prepare(`
+            UPDATE news
             SET deleted = 0, is_visible = 1
             WHERE id = ? AND deleted = 1
           `).run(id);
@@ -11475,6 +11521,7 @@ if (
           const news = db.prepare(`
             SELECT *
             FROM news
+            WHERE deleted = 0
             ORDER BY sort_order, id
           `).all();
 
@@ -11772,15 +11819,12 @@ if (
           }
 
           const id = Number(path.split("/")[4]);
-          const item = db.prepare("SELECT image FROM news WHERE id = ?").get(id);
+          db.prepare(`
+            UPDATE news
+            SET deleted = 1, is_visible = 0
+            WHERE id = ? AND deleted = 0
+          `).run(id);
 
-          if (item?.image) {
-            await fs.unlink(
-              pathModule.join(UPLOADS_DIR, pathModule.basename(item.image))
-            ).catch(() => {});
-          }
-
-          db.prepare("DELETE FROM news WHERE id = ?").run(id);
           return redirect(res, "/admin/news");
         }
 
