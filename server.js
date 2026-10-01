@@ -2409,6 +2409,17 @@ if (
             ORDER BY recommendation_order, recommendation_id
           `).all();
 
+          const aboutPage = db.prepare(`
+            SELECT title, content
+            FROM pages
+            WHERE slug = ?
+              AND is_visible = 1
+            LIMIT 1
+          `).get("about");
+          const aboutPreview = aboutPage
+            ? aboutPage.content.trim().split(/\s+/).slice(0, 35).join(" ")
+            : "";
+
           return sendHtml(
             res,
             renderPage(
@@ -2456,6 +2467,18 @@ if (
                     Перейти в каталог
                   </a>
                 </p>
+
+                ${
+                  aboutPage
+                    ? `
+                      <section>
+                        <h2>${escapeHtml(aboutPage.title)}</h2>
+                        <p>${escapeHtml(aboutPreview)}${aboutPage.content.trim().split(/\s+/).length > 35 ? "…" : ""}</p>
+                        <p><a href="/about">Подробнее об О компании</a></p>
+                      </section>
+                    `
+                    : ""
+                }
 
                 ${
                   services.length > 0
@@ -2620,20 +2643,28 @@ if (
           req.method === "GET" &&
           path === "/about"
         ) {
+          const aboutPage = db.prepare(`
+            SELECT title, content
+            FROM pages
+            WHERE slug = ?
+              AND is_visible = 1
+            LIMIT 1
+          `).get("about");
 
           return sendHtml(
             res,
             renderPage(
               req,
-              "О компании",
-              `
-                <h1>О компании</h1>
-
-                <p>
-                  Интернет-магазин
-                  Karimoff.
-                </p>
-              `
+              aboutPage?.title || "О компании",
+              aboutPage
+                ? `
+                    <h1>${escapeHtml(aboutPage.title)}</h1>
+                    <div>${escapeHtml(aboutPage.content).replace(/\n/g, "<br>")}</div>
+                  `
+                : `
+                    <h1>О компании</h1>
+                    <p>Интернет-магазин Karimoff.</p>
+                  `
             )
           );
         }
