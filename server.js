@@ -421,6 +421,52 @@ function renderPage(
     `
     : "";
 
+  const mobileNavigation = publicPage
+    ? `
+      <style>
+        @media (max-width: 640px) {
+          body {
+            padding-bottom: calc(68px + env(safe-area-inset-bottom));
+          }
+
+          .mobile-bottom-nav {
+            position: fixed;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            z-index: 1100;
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            padding: 8px 4px calc(8px + env(safe-area-inset-bottom));
+            border-top: 1px solid #d8d8d8;
+            background: #fff;
+            text-align: center;
+            box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.08);
+          }
+
+          .mobile-bottom-nav a {
+            color: inherit;
+            font-size: 12px;
+            text-decoration: none;
+          }
+        }
+
+        @media (min-width: 641px) {
+          .mobile-bottom-nav {
+            display: none;
+          }
+        }
+      </style>
+      <nav class="mobile-bottom-nav" aria-label="Мобильная навигация">
+        <a href="/">Главная</a>
+        <a href="/catalog">Каталог</a>
+        <a href="/catalog">Поиск</a>
+        <a href="/favorites">Избранное</a>
+        <a href="/cart">Корзина</a>
+      </nav>
+    `
+    : "";
+
   const backToTop =
     !pathname.startsWith("/admin") && !isAdmin(req)
       ? `
@@ -470,6 +516,8 @@ ${breadcrumbs}
 ${content}
 
 ${publicFooter}
+
+${mobileNavigation}
 
 ${backToTop}
 
