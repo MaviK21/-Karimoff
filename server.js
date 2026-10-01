@@ -13401,6 +13401,37 @@ if (
 
 
         // ==================================================
+        // ПУБЛИЧНАЯ СТРАНИЦА ПО SLUG
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(path)
+        ) {
+          const slug = path.slice(1);
+          const page = db.prepare(`
+            SELECT title, content
+            FROM pages
+            WHERE slug = ?
+              AND is_visible = 1
+          `).get(slug);
+
+          if (page) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                page.title,
+                `
+                  <h1>${escapeHtml(page.title)}</h1>
+                  <div>${escapeHtml(page.content).replace(/\n/g, "<br>")}</div>
+                `
+              )
+            );
+          }
+        }
+
+        // ==================================================
         // 404
         // ==================================================
 
