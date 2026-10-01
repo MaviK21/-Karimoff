@@ -977,6 +977,31 @@ function saveUploadedVideo(file, allowedTypesOverride) {
   return `/uploads/${filename}`;
 }
 
+function saveServiceCharacteristics(serviceId, params, replaceExisting = false) {
+  const names = params.getAll("characteristic_name");
+  const values = params.getAll("characteristic_value");
+  const save = db.transaction(() => {
+    if (replaceExisting) {
+      db.prepare("DELETE FROM service_characteristics WHERE service_id = ?").run(serviceId);
+    }
+
+    const insert = db.prepare(`
+      INSERT INTO service_characteristics (service_id, name, value, sort_order)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    for (let index = 0; index < Math.max(names.length, values.length); index++) {
+      const name = (names[index] || "").trim();
+      const value = (values[index] || "").trim();
+      if (name && value) {
+        insert.run(serviceId, name, value, index);
+      }
+    }
+  });
+
+  save();
+}
+
 const DOCUMENT_MAX_BYTES =
   20 * 1024 * 1024;
 
@@ -2644,10 +2669,15 @@ const server =
       ".mov": "video/quicktime"
     };
 
+    const contentType =
+      contentTypes[ext] ||
+      "application/octet-stream";
+
     res.writeHead(200, {
-      "Content-Type":
-        contentTypes[ext] ||
-        "application/octet-stream"
+      "Content-Type": contentType,
+      ...(contentType.startsWith("image/")
+        ? { "Cache-Control": "public, max-age=31536000, immutable" }
+        : {})
     });
 
     return res.end(data);
@@ -3050,7 +3080,7 @@ if (
           path === "/services"
         ) {
           const services = db.prepare(`
-            SELECT name, short_description, image
+            SELECT id, name, short_description, image, video, price, price_on_request, unit
             FROM services
             WHERE is_visible = 1
               AND deleted = 0
@@ -3082,7 +3112,24 @@ if (
                               </p>
                             `
                             : ""}
+                          ${db.prepare("SELECT image FROM service_images WHERE service_id = ? ORDER BY sort_order, id").all(service.id).map(image => `
+                            <p>
+                              <img
+                                src="${escapeHtml(image.image)}"
+                                alt="Дополнительное фото: ${escapeHtml(service.name)}"
+                                style="max-width:200px; max-height:200px;"
+                              >
+                            </p>
+                          `).join("")}
+                          ${service.video ? `<p><video src="${escapeHtml(service.video)}" controls preload="metadata" style="max-width:100%;"></video></p>` : ""}
+                          <p><strong>${service.price_on_request ? "Цена по запросу" : `${escapeHtml(service.price)} ${escapeHtml(service.unit || "шт.")}`}</strong></p>
                           <p>${escapeHtml(service.short_description || "")}</p>
+                          ${(() => {
+                            const characteristics = db.prepare("SELECT name, value FROM service_characteristics WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
+                            return characteristics.length
+                              ? `<ul>${characteristics.map(item => `<li><strong>${escapeHtml(item.name)}:</strong> ${escapeHtml(item.value)}</li>`).join("")}</ul>`
+                              : "";
+                          })()}
                         </li>
                       `).join("")}
                     </ul>
@@ -3441,8 +3488,8 @@ if (
                       </label>
                     </p>
 
-                    <button type="submit">Сохранить</button>
-                  </form>
+                  <button type="submit">Сохранить</button>
+                </form>
                 `
               )
             );
@@ -11585,11 +11632,64 @@ if (
                   </p>
 
                   <p>
+                    Галерея изображений:
+                    <input type="file" name="gallery" accept="image/jpeg,image/png,image/webp" multiple>
+                  </p>
+
+                  <p>
+                    Видео (необязательно):
+                    <input type="file" name="video" accept="video/mp4,video/webm,video/ogg,video/quicktime">
+                  </p>
+
+                  <p>
+                    Цена:
+                    <input type="number" name="price" min="0" step="0.01" value="0">
+                  </p>
+                  <p>
+                    <label>
+                      <input type="checkbox" name="price_on_request" value="1">
+                      Цена по запросу
+                    </label>
+                  </p>
+                  <p>
+                    Единица измерения:
+                    <input type="text" name="unit" value="шт." maxlength="32">
+                  </p>
+
+                  <fieldset class="service-characteristics-editor">
+                    <legend>Характеристики</legend>
+                    <div class="service-characteristic-rows"></div>
+                    <button type="button" class="add-service-characteristic">Добавить характеристику</button>
+                    <template class="service-characteristic-template">
+                      <div class="service-characteristic-row">
+                        <input type="text" name="characteristic_name" placeholder="Название характеристики">
+                        <input type="text" name="characteristic_value" placeholder="Значение">
+                        <button type="button" class="remove-service-characteristic">Удалить</button>
+                      </div>
+                    </template>
+                  </fieldset>
+
+                  <p>
                     Порядок отображения:
                     <input type="number" name="sort_order" value="0">
                   </p>
 
-                  <button type="submit">Добавить услугу</button>
+<button type="submit">Добавить услугу</button>
+                  <script>
+                    (() => {
+                      const editor = document.currentScript.closest("form").querySelector(".service-characteristics-editor");
+                      const rows = editor.querySelector(".service-characteristic-rows");
+                      const template = editor.querySelector(".service-characteristic-template");
+                      editor.addEventListener("click", event => {
+                        if (event.target.closest(".add-service-characteristic")) {
+                          rows.append(template.content.cloneNode(true));
+                        }
+                        if (event.target.closest(".remove-service-characteristic")) {
+                          event.target.closest(".service-characteristic-row").remove();
+                        }
+                      });
+                    })();
+                  </script>
                 </form>
 
                 <h2>Услуги</h2>
@@ -11642,28 +11742,36 @@ if (
           const shortDescription = params.get("short_description")?.trim() || "";
           const description = params.get("description")?.trim() || "";
           const sortOrder = Number(params.get("sort_order") || 0);
+          const priceOnRequest = params.get("price_on_request") === "1";
+          const priceValue = params.get("price")?.trim() || "";
+          const price = priceOnRequest ? 0 : Number(priceValue);
+          const unit = params.get("unit")?.trim() || "шт.";
           const imageFile = params.getFile("image");
+          const videoFile = params.getFile("video");
 
           if (
             !name ||
             !Number.isInteger(sortOrder) ||
             sortOrder < 0 ||
-            !description
+            !description ||
+            (!priceOnRequest && (!priceValue || !Number.isFinite(price) || price < 0))
           ) {
             return sendHtml(
               res,
               renderPage(
                 req,
                 "Ошибка",
-                `<h1>Заполните название, полное описание и корректный порядок.</h1>`
+                `<h1>Заполните название, описание, корректный порядок и цену либо выберите «Цена по запросу».</h1>`
               ),
               400
             );
           }
 
           let image = "";
+          let video = "";
           try {
             image = imageFile ? await saveUploadedImage(imageFile) : "";
+            video = videoFile ? saveUploadedVideo(videoFile) : "";
           } catch (error) {
             return sendHtml(
               res,
@@ -11672,11 +11780,30 @@ if (
             );
           }
 
-          db.prepare(`
+          const result = db.prepare(`
             INSERT INTO services
-            (name, short_description, description, image, sort_order, is_visible)
-            VALUES (?, ?, ?, ?, ?, 1)
-          `).run(name, shortDescription, description, image, sortOrder);
+            (name, short_description, description, image, sort_order, is_visible, video, price, price_on_request, unit)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+          `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit);
+
+          saveServiceCharacteristics(Number(result.lastInsertRowid), params);
+
+          const galleryFiles = params.getAllFiles("gallery");
+          let gallerySortOrder = 0;
+          for (const galleryFile of galleryFiles) {
+            const galleryImage = await saveUploadedImage(galleryFile, {
+              "image/jpeg": ".jpg",
+              "image/png": ".png",
+              "image/webp": ".webp"
+            });
+            if (!galleryImage) {
+              continue;
+            }
+            db.prepare(`
+              INSERT INTO service_images (service_id, image, sort_order)
+              VALUES (?, ?, ?)
+            `).run(Number(result.lastInsertRowid), galleryImage, gallerySortOrder++);
+          }
 
           return redirect(res, "/admin/services");
         }
@@ -11732,11 +11859,74 @@ if (
                   </p>
 
                   <p>
+                    Галерея изображений:
+                    <input type="file" name="gallery" accept="image/jpeg,image/png,image/webp" multiple>
+                  </p>
+                  ${db.prepare("SELECT image FROM service_images WHERE service_id = ? ORDER BY sort_order, id").all(id).map(image => `<img src="${escapeHtml(image.image)}" alt="Дополнительное изображение услуги" width="100">`).join("")}
+
+                  <p>
+                    Видео (необязательно):
+                    <input type="file" name="video" accept="video/mp4,video/webm,video/ogg,video/quicktime">
+                    ${service.video ? `<br><video src="${escapeHtml(service.video)}" controls width="240"></video>` : ""}
+                  </p>
+
+                  <p>
+                    Цена:
+                    <input type="number" name="price" min="0" step="0.01" value="${escapeHtml(service.price)}">
+                  </p>
+                  <p>
+                    <label>
+                      <input type="checkbox" name="price_on_request" value="1" ${service.price_on_request ? "checked" : ""}>
+                      Цена по запросу
+                    </label>
+                  </p>
+                  <p>
+                    Единица измерения:
+                    <input type="text" name="unit" value="${escapeHtml(service.unit || "шт.")}" maxlength="32">
+                  </p>
+
+                  <fieldset class="service-characteristics-editor">
+                    <legend>Характеристики</legend>
+                    <div class="service-characteristic-rows">
+                      ${db.prepare("SELECT name, value FROM service_characteristics WHERE service_id = ? ORDER BY sort_order, id").all(id).map(item => `
+                        <div class="service-characteristic-row">
+                          <input type="text" name="characteristic_name" value="${escapeHtml(item.name)}" placeholder="Название характеристики">
+                          <input type="text" name="characteristic_value" value="${escapeHtml(item.value)}" placeholder="Значение">
+                          <button type="button" class="remove-service-characteristic">Удалить</button>
+                        </div>
+                      `).join("")}
+                    </div>
+                    <button type="button" class="add-service-characteristic">Добавить характеристику</button>
+                    <template class="service-characteristic-template">
+                      <div class="service-characteristic-row">
+                        <input type="text" name="characteristic_name" placeholder="Название характеристики">
+                        <input type="text" name="characteristic_value" placeholder="Значение">
+                        <button type="button" class="remove-service-characteristic">Удалить</button>
+                      </div>
+                    </template>
+                  </fieldset>
+
+                  <p>
                     Порядок отображения:
                     <input type="number" name="sort_order" value="${service.sort_order}">
                   </p>
 
                   <button type="submit">Сохранить</button>
+                  <script>
+                    (() => {
+                      const editor = document.currentScript.closest("form").querySelector(".service-characteristics-editor");
+                      const rows = editor.querySelector(".service-characteristic-rows");
+                      const template = editor.querySelector(".service-characteristic-template");
+                      editor.addEventListener("click", event => {
+                        if (event.target.closest(".add-service-characteristic")) {
+                          rows.append(template.content.cloneNode(true));
+                        }
+                        if (event.target.closest(".remove-service-characteristic")) {
+                          event.target.closest(".service-characteristic-row").remove();
+                        }
+                      });
+                    })();
+                  </script>
                 </form>
               `
             )
@@ -11769,29 +11959,39 @@ if (
           const shortDescription = params.get("short_description")?.trim() || "";
           const description = params.get("description")?.trim() || "";
           const sortOrder = Number(params.get("sort_order") || 0);
+          const priceOnRequest = params.get("price_on_request") === "1";
+          const priceValue = params.get("price")?.trim() || "";
+          const price = priceOnRequest ? 0 : Number(priceValue);
+          const unit = params.get("unit")?.trim() || "шт.";
           const imageFile = params.getFile("image");
+          const videoFile = params.getFile("video");
 
           if (
             !name ||
             !Number.isInteger(sortOrder) ||
             sortOrder < 0 ||
-            !description
+            !description ||
+            (!priceOnRequest && (!priceValue || !Number.isFinite(price) || price < 0))
           ) {
             return sendHtml(
               res,
               renderPage(
                 req,
                 "Ошибка",
-                `<h1>Заполните название, полное описание и корректный порядок.</h1>`
+                `<h1>Заполните название, описание, корректный порядок и цену либо выберите «Цена по запросу».</h1>`
               ),
               400
             );
           }
 
           let image = service.image;
+          let video = service.video || "";
           try {
             if (imageFile) {
               image = await saveUploadedImage(imageFile);
+            }
+            if (videoFile) {
+              video = saveUploadedVideo(videoFile);
             }
           } catch (error) {
             return sendHtml(
@@ -11803,9 +12003,32 @@ if (
 
           db.prepare(`
             UPDATE services
-            SET name = ?, short_description = ?, description = ?, image = ?, sort_order = ?
+            SET name = ?, short_description = ?, description = ?, image = ?, sort_order = ?, video = ?, price = ?, price_on_request = ?, unit = ?
             WHERE id = ?
-          `).run(name, shortDescription, description, image, sortOrder, id);
+          `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, id);
+
+          saveServiceCharacteristics(id, params, true);
+
+          const galleryFiles = params.getAllFiles("gallery");
+          let gallerySortOrder = db.prepare(`
+            SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+            FROM service_images
+            WHERE service_id = ?
+          `).get(id).next_sort_order;
+          for (const galleryFile of galleryFiles) {
+            const galleryImage = await saveUploadedImage(galleryFile, {
+              "image/jpeg": ".jpg",
+              "image/png": ".png",
+              "image/webp": ".webp"
+            });
+            if (!galleryImage) {
+              continue;
+            }
+            db.prepare(`
+              INSERT INTO service_images (service_id, image, sort_order)
+              VALUES (?, ?, ?)
+            `).run(id, galleryImage, gallerySortOrder++);
+          }
 
           return redirect(res, "/admin/services");
         }
@@ -14283,6 +14506,52 @@ if (
 
 
 // ======================================================
+// РЕЗЕРВНОЕ КОПИРОВАНИЕ БАЗЫ
+// ======================================================
+
+const BACKUPS_DIR = pathModule.join(__dirname, "backups");
+let backupInProgress = false;
+
+async function createDatabaseBackup() {
+  if (backupInProgress) {
+    return;
+  }
+
+  backupInProgress = true;
+
+  try {
+    mkdirSync(BACKUPS_DIR, { recursive: true });
+
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-");
+    const backupPath = pathModule.join(
+      BACKUPS_DIR,
+      `karimoff-${timestamp}.db`
+    );
+
+    await db.backup(backupPath);
+
+    const backupFiles = (await fs.readdir(BACKUPS_DIR))
+      .filter(name => /^karimoff-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.db$/.test(name))
+      .sort()
+      .reverse();
+
+    await Promise.all(
+      backupFiles.slice(7).map(name =>
+        fs.unlink(pathModule.join(BACKUPS_DIR, name))
+      )
+    );
+
+    console.log(`Резервная копия БД создана: ${backupPath}`);
+  } catch (error) {
+    console.error("Не удалось создать резервную копию БД:", error);
+  } finally {
+    backupInProgress = false;
+  }
+}
+
+// ======================================================
 // ЗАПУСК СЕРВЕРА
 // ======================================================
 
@@ -14292,5 +14561,10 @@ server.listen(
     console.log(
       `Сервер запущен: http://localhost:${PORT}`
     );
+
+    void createDatabaseBackup();
+    setInterval(() => {
+      void createDatabaseBackup();
+    }, 24 * 60 * 60 * 1000);
   }
 );
