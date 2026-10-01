@@ -138,21 +138,23 @@ function requireAdmin(req, res) {
 
   sendHtml(
     res,
-    `
-      ${renderMenu(req)}
+    renderPage(
+      req,
+      "Доступ запрещён",
+      `
+        <h1>Доступ запрещён</h1>
 
-      <h1>Доступ запрещён</h1>
+        <p>
+          Эта страница доступна только администратору.
+        </p>
 
-      <p>
-        Эта страница доступна только администратору.
-      </p>
-
-      <p>
-        <a href="/admin">
-          Войти как администратор
-        </a>
-      </p>
-    `,
+        <p>
+          <a href="/admin">
+            Войти как администратор
+          </a>
+        </p>
+      `
+    ),
     403
   );
 
@@ -289,8 +291,7 @@ function renderPage(
   if (
     req.method === "GET" &&
     pathname !== "/" &&
-    !pathname.startsWith("/admin") &&
-    !isAdmin(req)
+    !pathname.startsWith("/admin")
   ) {
     const breadcrumbItems = [
       { label: "Главная", href: "/" }
@@ -374,14 +375,10 @@ function renderPage(
     `;
   }
 
-  const publicPage =
-    !pathname.startsWith("/admin") && !isAdmin(req);
+  const adminPath = pathname === "/admin" || pathname.startsWith("/admin/");
   const adminLoginPage = pathname === "/admin" && !isAdmin(req);
-  const adminPanelPage = isAdmin(req) && (
-    pathname.startsWith("/admin") ||
-    ["/catalog", "/orders", "/add-product"].includes(pathname) ||
-    pathname.startsWith("/edit-product/")
-  );
+  const adminPanelPage = adminPath && isAdmin(req);
+  const publicPage = !adminPath;
   const footerCategories = publicPage
     ? getCategories()
         .filter(category => category.parent_id === null && !category.hidden)
@@ -473,7 +470,7 @@ function renderPage(
     : "";
 
   const backToTop =
-    !pathname.startsWith("/admin") && !isAdmin(req)
+    publicPage
       ? `
         <button
           id="back-to-top"
@@ -512,12 +509,12 @@ function renderPage(
   <title>${escapeHtml(title)}</title>
 
 ${publicPage ? '<link rel="stylesheet" href="/public/css/style.css">' : ""}
-${adminLoginPage || adminPanelPage ? '<link rel="stylesheet" href="/public/css/admin.css">' : ""}
+${adminPath || adminPanelPage ? '<link rel="stylesheet" href="/public/css/admin.css">' : ""}
 </head>
 
 <body class="${adminLoginPage ? "admin-login-page " : ""}${adminPanelPage ? "admin-panel-page " : ""}${publicPage ? "public-page " : ""}${pathname === "/" ? "home-page" : pathname === "/catalog" ? "catalog-page" : pathname === "/services" ? "services-page" : pathname === "/news" ? "news-page" : pathname === "/projects" ? "projects-page" : /^\/product\/\d+$/.test(pathname) ? "product-page" : ""}">
 
-${renderMenu(req)}
+${adminLoginPage || (adminPath && !adminPanelPage) ? "" : renderMenu(req, adminPanelPage)}
 
 ${breadcrumbs}
 
@@ -537,21 +534,25 @@ ${backToTop}
 }
 
 
-function renderMenu(req) {
-  if (isAdmin(req)) {
+function renderMenu(req, adminPanelPage = false) {
+  if (adminPanelPage) {
     return `
       <nav>
-        <a href="/">Главная</a> |
-        <a href="/catalog">Каталог</a> |
-      <a href="/about">О нас</a> |
-      <a href="/services">Услуги</a> |
-      <a href="/service-request">Услуги / аренда</a> |
-        <a href="/cart">Корзина</a> |
         <a href="/admin">Админ-панель</a> |
-        <a href="/orders">Заказы</a> |
-        <a href="/add-product">Добавить товар</a> |
+        <a href="/admin/brands">Бренды</a> |
         <a href="/admin/categories">Категории</a> |
-        <a href="/admin/logout">Выйти</a>
+        <a href="/admin/deleted-products">Удалённые товары</a> |
+        <a href="/admin/characteristics">Характеристики</a> |
+        <a href="/admin/category-characteristics">Характеристики категорий</a> |
+        <a href="/admin/settings">Настройки заявок</a> |
+        <a href="/admin/contacts">Контакты</a> |
+        <a href="/admin/services">Услуги</a> |
+        <a href="/admin/deleted-materials">Удалённые материалы</a> |
+        <a href="/admin/projects">Проекты</a> |
+        <a href="/admin/news">Новости</a> |
+        <a href="/admin/main-banner">Главный баннер</a> |
+        <a href="/admin/pages">Страницы</a> |
+        <a href="/admin/logout">Выход</a>
       </nav>
 
       <hr>
@@ -1000,6 +1001,58 @@ function saveServiceCharacteristics(serviceId, params, replaceExisting = false) 
   });
 
   save();
+}
+
+function getServiceTariffs(params) {
+  const names = params.getAll("tariff_name");
+  const prices = params.getAll("tariff_price");
+  const units = params.getAll("tariff_unit");
+  const sortOrders = params.getAll("tariff_sort_order");
+  const tariffs = [];
+
+  for (let index = 0; index < Math.max(names.length, prices.length, units.length, sortOrders.length); index++) {
+    const name = (names[index] || "").trim();
+    const priceValue = (prices[index] || "").trim();
+    const unit = (units[index] || "").trim();
+    const sortOrderValue = (sortOrders[index] || "").trim();
+
+    if (!name && !priceValue && !unit && !sortOrderValue) {
+      continue;
+    }
+
+    const price = Number(priceValue);
+    const sortOrder = Number(sortOrderValue);
+    if (
+      !name ||
+      !priceValue ||
+      !Number.isFinite(price) ||
+      price < 0 ||
+      !unit ||
+      !Number.isInteger(sortOrder) ||
+      sortOrder < 0
+    ) {
+      return { error: "Заполните название, неотрицательную цену, единицу и целый неотрицательный порядок для каждого тарифа." };
+    }
+
+    tariffs.push({ name, price, unit, sortOrder });
+  }
+
+  return { tariffs };
+}
+
+function replaceServiceTariffs(serviceId, tariffs) {
+  const replace = db.transaction(() => {
+    db.prepare("DELETE FROM service_tariffs WHERE service_id = ?").run(serviceId);
+    const insert = db.prepare(`
+      INSERT INTO service_tariffs (service_id, name, price, unit, sort_order)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const tariff of tariffs) {
+      insert.run(serviceId, tariff.name, tariff.price, tariff.unit, tariff.sortOrder);
+    }
+  });
+
+  replace();
 }
 
 const DOCUMENT_MAX_BYTES =
@@ -3123,6 +3176,12 @@ if (
                           `).join("")}
                           ${service.video ? `<p><video src="${escapeHtml(service.video)}" controls preload="metadata" style="max-width:100%;"></video></p>` : ""}
                           <p><strong>${service.price_on_request ? "Цена по запросу" : `${escapeHtml(service.price)} ${escapeHtml(service.unit || "шт.")}`}</strong></p>
+                          ${(() => {
+                            const tariffs = db.prepare("SELECT name, price, unit FROM service_tariffs WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
+                            return tariffs.length
+                              ? `<ul>${tariffs.map(tariff => `<li><strong>${escapeHtml(tariff.name)}:</strong> ${escapeHtml(tariff.price)} ${escapeHtml(tariff.unit)}</li>`).join("")}</ul>`
+                              : "";
+                          })()}
                           <p>${escapeHtml(service.short_description || "")}</p>
                           ${(() => {
                             const characteristics = db.prepare("SELECT name, value FROM service_characteristics WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
@@ -11656,6 +11715,21 @@ if (
                     <input type="text" name="unit" value="шт." maxlength="32">
                   </p>
 
+                  <fieldset class="service-tariffs-editor">
+                    <legend>Тарифы</legend>
+                    <div class="service-tariff-rows"></div>
+                    <button type="button" class="add-service-tariff">Добавить тариф</button>
+                    <template class="service-tariff-template">
+                      <div class="service-tariff-row">
+                        <input type="text" name="tariff_name" placeholder="Название тарифа">
+                        <input type="number" name="tariff_price" min="0" step="0.01" placeholder="Цена">
+                        <input type="text" name="tariff_unit" placeholder="Единица">
+                        <input type="number" name="tariff_sort_order" min="0" step="1" placeholder="Порядок">
+                        <button type="button" class="remove-service-tariff">Удалить</button>
+                      </div>
+                    </template>
+                  </fieldset>
+
                   <fieldset class="service-characteristics-editor">
                     <legend>Характеристики</legend>
                     <div class="service-characteristic-rows"></div>
@@ -11675,6 +11749,24 @@ if (
                   </p>
 
 <button type="submit">Добавить услугу</button>
+                  <script>
+                    (() => {
+                      const form = document.currentScript.closest("form");
+                      const editor = form.querySelector(".service-tariffs-editor");
+                      const rows = editor.querySelector(".service-tariff-rows");
+                      const template = editor.querySelector(".service-tariff-template");
+                      editor.addEventListener("click", event => {
+                        if (event.target.closest(".add-service-tariff")) {
+                          const row = template.content.cloneNode(true);
+                          row.querySelector('[name="tariff_sort_order"]').value = rows.children.length;
+                          rows.append(row);
+                        }
+                        if (event.target.closest(".remove-service-tariff")) {
+                          event.target.closest(".service-tariff-row").remove();
+                        }
+                      });
+                    })();
+                  </script>
                   <script>
                     (() => {
                       const editor = document.currentScript.closest("form").querySelector(".service-characteristics-editor");
@@ -11746,6 +11838,7 @@ if (
           const priceValue = params.get("price")?.trim() || "";
           const price = priceOnRequest ? 0 : Number(priceValue);
           const unit = params.get("unit")?.trim() || "шт.";
+          const tariffResult = getServiceTariffs(params);
           const imageFile = params.getFile("image");
           const videoFile = params.getFile("video");
 
@@ -11754,14 +11847,15 @@ if (
             !Number.isInteger(sortOrder) ||
             sortOrder < 0 ||
             !description ||
-            (!priceOnRequest && (!priceValue || !Number.isFinite(price) || price < 0))
+            (!priceOnRequest && (!priceValue || !Number.isFinite(price) || price < 0)) ||
+            tariffResult.error
           ) {
             return sendHtml(
               res,
               renderPage(
                 req,
                 "Ошибка",
-                `<h1>Заполните название, описание, корректный порядок и цену либо выберите «Цена по запросу».</h1>`
+                `<h1>${escapeHtml(tariffResult.error || "Заполните название, описание, корректный порядок и цену либо выберите «Цена по запросу».")}</h1>`
               ),
               400
             );
@@ -11786,6 +11880,7 @@ if (
             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
           `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit);
 
+          replaceServiceTariffs(Number(result.lastInsertRowid), tariffResult.tariffs);
           saveServiceCharacteristics(Number(result.lastInsertRowid), params);
 
           const galleryFiles = params.getAllFiles("gallery");
@@ -11885,6 +11980,31 @@ if (
                     <input type="text" name="unit" value="${escapeHtml(service.unit || "шт.")}" maxlength="32">
                   </p>
 
+                  <fieldset class="service-tariffs-editor">
+                    <legend>Тарифы</legend>
+                    <div class="service-tariff-rows">
+                      ${db.prepare("SELECT name, price, unit, sort_order FROM service_tariffs WHERE service_id = ? ORDER BY sort_order, id").all(id).map(tariff => `
+                        <div class="service-tariff-row">
+                          <input type="text" name="tariff_name" value="${escapeHtml(tariff.name)}" placeholder="Название тарифа">
+                          <input type="number" name="tariff_price" min="0" step="0.01" value="${escapeHtml(tariff.price)}" placeholder="Цена">
+                          <input type="text" name="tariff_unit" value="${escapeHtml(tariff.unit)}" placeholder="Единица">
+                          <input type="number" name="tariff_sort_order" min="0" step="1" value="${escapeHtml(tariff.sort_order)}" placeholder="Порядок">
+                          <button type="button" class="remove-service-tariff">Удалить</button>
+                        </div>
+                      `).join("")}
+                    </div>
+                    <button type="button" class="add-service-tariff">Добавить тариф</button>
+                    <template class="service-tariff-template">
+                      <div class="service-tariff-row">
+                        <input type="text" name="tariff_name" placeholder="Название тарифа">
+                        <input type="number" name="tariff_price" min="0" step="0.01" placeholder="Цена">
+                        <input type="text" name="tariff_unit" placeholder="Единица">
+                        <input type="number" name="tariff_sort_order" min="0" step="1" placeholder="Порядок">
+                        <button type="button" class="remove-service-tariff">Удалить</button>
+                      </div>
+                    </template>
+                  </fieldset>
+
                   <fieldset class="service-characteristics-editor">
                     <legend>Характеристики</legend>
                     <div class="service-characteristic-rows">
@@ -11912,6 +12032,24 @@ if (
                   </p>
 
                   <button type="submit">Сохранить</button>
+                  <script>
+                    (() => {
+                      const form = document.currentScript.closest("form");
+                      const editor = form.querySelector(".service-tariffs-editor");
+                      const rows = editor.querySelector(".service-tariff-rows");
+                      const template = editor.querySelector(".service-tariff-template");
+                      editor.addEventListener("click", event => {
+                        if (event.target.closest(".add-service-tariff")) {
+                          const row = template.content.cloneNode(true);
+                          row.querySelector('[name="tariff_sort_order"]').value = rows.children.length;
+                          rows.append(row);
+                        }
+                        if (event.target.closest(".remove-service-tariff")) {
+                          event.target.closest(".service-tariff-row").remove();
+                        }
+                      });
+                    })();
+                  </script>
                   <script>
                     (() => {
                       const editor = document.currentScript.closest("form").querySelector(".service-characteristics-editor");
@@ -11963,6 +12101,7 @@ if (
           const priceValue = params.get("price")?.trim() || "";
           const price = priceOnRequest ? 0 : Number(priceValue);
           const unit = params.get("unit")?.trim() || "шт.";
+          const tariffResult = getServiceTariffs(params);
           const imageFile = params.getFile("image");
           const videoFile = params.getFile("video");
 
@@ -11971,14 +12110,15 @@ if (
             !Number.isInteger(sortOrder) ||
             sortOrder < 0 ||
             !description ||
-            (!priceOnRequest && (!priceValue || !Number.isFinite(price) || price < 0))
+            (!priceOnRequest && (!priceValue || !Number.isFinite(price) || price < 0)) ||
+            tariffResult.error
           ) {
             return sendHtml(
               res,
               renderPage(
                 req,
                 "Ошибка",
-                `<h1>Заполните название, описание, корректный порядок и цену либо выберите «Цена по запросу».</h1>`
+                `<h1>${escapeHtml(tariffResult.error || "Заполните название, описание, корректный порядок и цену либо выберите «Цена по запросу».")}</h1>`
               ),
               400
             );
@@ -12007,6 +12147,7 @@ if (
             WHERE id = ?
           `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, id);
 
+          replaceServiceTariffs(id, tariffResult.tariffs);
           saveServiceCharacteristics(id, params, true);
 
           const galleryFiles = params.getAllFiles("gallery");
