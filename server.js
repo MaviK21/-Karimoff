@@ -5,6 +5,7 @@ import { createServer } from "http";
 import { randomBytes } from "crypto";
 import nodemailer from "nodemailer";
 import Busboy from "busboy";
+import sharp from "sharp";
 import db from "./lib/db.js";
 
 import pathModule from "path";
@@ -440,6 +441,37 @@ function renderPage(
     : "";
 
 
+  const cookieNotice = publicPage
+    ? `
+      <aside class="cookie-notice" id="cookie-notice" aria-label="Уведомление о cookies" hidden>
+        <p>Сайт использует cookies для корректной работы.</p>
+        <button type="button" id="cookie-notice-accept">Понятно</button>
+      </aside>
+      <script>
+        (() => {
+          const notice = document.getElementById("cookie-notice");
+          const acceptButton = document.getElementById("cookie-notice-accept");
+          const storageKey = "karimoff-cookies-accepted";
+
+          try {
+            notice.hidden = localStorage.getItem(storageKey) === "1";
+          } catch {
+            notice.hidden = false;
+          }
+
+          acceptButton.addEventListener("click", () => {
+            notice.hidden = true;
+            try {
+              localStorage.setItem(storageKey, "1");
+            } catch {
+              // Storage may be disabled by the browser.
+            }
+          });
+        })();
+      </script>
+    `
+    : "";
+
   const backToTop =
     !pathname.startsWith("/admin") && !isAdmin(req)
       ? `
@@ -492,6 +524,8 @@ ${breadcrumbs}
 ${content}
 
 ${publicFooter}
+
+${cookieNotice}
 
 ${mobileNavigation}
 
@@ -702,7 +736,52 @@ function parseMultipartBody(req, contentType) {
   });
 }
 
-function saveUploadedImage(file, allowedTypesOverride) {
+function detectImageFormat(data) {
+  if (
+    data.length >= 3 &&
+    data[0] === 0xff &&
+    data[1] === 0xd8 &&
+    data[2] === 0xff
+  ) {
+    return "image/jpeg";
+  }
+
+  if (
+    data.length >= 8 &&
+    data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  ) {
+    return "image/png";
+  }
+
+  if (
+    data.length >= 12 &&
+    data.toString("ascii", 0, 4) === "RIFF" &&
+    data.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return "image/webp";
+  }
+
+  if (
+    data.length >= 6 &&
+    ["GIF87a", "GIF89a"].includes(data.toString("ascii", 0, 6))
+  ) {
+    return "image/gif";
+  }
+
+  if (
+    data.length >= 12 &&
+    data.toString("ascii", 4, 8) === "ftyp"
+  ) {
+    const brand = data.toString("ascii", 8, 12);
+    if (["heic", "heix", "hevc", "hevx", "heif", "heis", "hevm", "mif1", "msf1"].includes(brand)) {
+      return "image/heic";
+    }
+  }
+
+  return null;
+}
+
+async function saveUploadedImage(file, allowedTypesOverride) {
 
   if (!file || !file.filename || !file.data.length) {
     return "";
@@ -733,6 +812,18 @@ function saveUploadedImage(file, allowedTypesOverride) {
     );
   }
 
+  const detectedFormat = detectImageFormat(file.data);
+  const acceptedDetectedFormats = file.contentType === "image/heic-sequence"
+    ? ["image/heic"]
+    : [file.contentType];
+
+  if (!detectedFormat || !acceptedDetectedFormats.includes(detectedFormat)) {
+    throw new Error(
+      "Содержимое файла не соответствует заявленному формату или формат не поддерживается."
+    );
+  }
+
+
   const uploadsDir =
     pathModule.join(
       process.cwd(),
@@ -755,9 +846,37 @@ function saveUploadedImage(file, allowedTypesOverride) {
     filename
   );
 
+  const supportedFormats = {
+    "image/jpeg": true,
+    "image/png": true,
+    "image/webp": true
+  };
+  let imageProcessor = supportedFormats[file.contentType]
+    ? sharp(file.data)
+        .rotate()
+        .resize({
+          width: 2000,
+          height: 2000,
+          fit: "inside",
+          withoutEnlargement: true
+        })
+    : null;
+
+  if (file.contentType === "image/jpeg") {
+    imageProcessor = imageProcessor.jpeg({ quality: 80, mozjpeg: true });
+  } else if (file.contentType === "image/png") {
+    imageProcessor = imageProcessor.png({ compressionLevel: 9, adaptiveFiltering: true });
+  } else if (file.contentType === "image/webp") {
+    imageProcessor = imageProcessor.webp({ quality: 80, effort: 5 });
+  }
+
+  const data = imageProcessor
+    ? await imageProcessor.toBuffer()
+    : file.data;
+
   writeFileSync(
     filePath,
-    file.data
+    data
   );
 
   return `/uploads/${filename}`;
@@ -6416,19 +6535,22 @@ return redirect(
 
             if (photoFilesWithFallbackType.length > 0) {
               try {
-                photoPaths = photoFilesWithFallbackType.map(
-                  photoFile =>
-                    saveUploadedImage(
-                      photoFile,
-                      {
-                        "image/jpeg": ".jpg",
-                        "image/png": ".png",
-                        "image/webp": ".webp",
-                        "image/heic": ".heic",
-                        "image/heic-sequence": ".heic"
-                      }
-                    )
-                ).filter(Boolean);
+                photoPaths = [];
+                for (const photoFile of photoFilesWithFallbackType) {
+                  const photoPath = await saveUploadedImage(
+                    photoFile,
+                    {
+                      "image/jpeg": ".jpg",
+                      "image/png": ".png",
+                      "image/webp": ".webp",
+                      "image/heic": ".heic",
+                      "image/heic-sequence": ".heic"
+                    }
+                  );
+                  if (photoPath) {
+                    photoPaths.push(photoPath);
+                  }
+                }
               } catch (uploadError) {
                 formErrors.photos =
                   uploadError?.message ||
@@ -6858,19 +6980,22 @@ return redirect(
  
             if (photoFilesWithFallbackType.length > 0) {
               try {
-                photoPaths = photoFilesWithFallbackType.map(
-                  photoFile =>
-                    saveUploadedImage(
-                      photoFile,
-                      {
-                        "image/jpeg": ".jpg",
-                        "image/png": ".png",
-                        "image/webp": ".webp",
-                        "image/heic": ".heic",
-                        "image/heic-sequence": ".heic"
-                      }
-                    )
-                ).filter(Boolean);
+                photoPaths = [];
+                for (const photoFile of photoFilesWithFallbackType) {
+                  const photoPath = await saveUploadedImage(
+                    photoFile,
+                    {
+                      "image/jpeg": ".jpg",
+                      "image/png": ".png",
+                      "image/webp": ".webp",
+                      "image/heic": ".heic",
+                      "image/heic-sequence": ".heic"
+                    }
+                  );
+                  if (photoPath) {
+                    photoPaths.push(photoPath);
+                  }
+                }
               } catch (uploadError) {
                 formErrors.photos =
                   uploadError?.message ||
@@ -9139,7 +9264,7 @@ const imageFile =
 
 const image =
   imageFile
-    ? saveUploadedImage(imageFile)
+    ? await saveUploadedImage(imageFile)
     : "";
 
           const sku =
@@ -9395,9 +9520,9 @@ const recommendedIds =
              `).get(productId).next_sort_order;
 
            for (const galleryFile of galleryFiles) {
-             const galleryImage =
-               saveUploadedImage(
-                 galleryFile,
+    const galleryImage =
+      await saveUploadedImage(
+        galleryFile,
                  galleryAllowedTypes
                );
 
@@ -10697,7 +10822,7 @@ if (sortOrder < 1) {
 
   const image =
     imageFile
-      ? saveUploadedImage(imageFile)
+      ? await saveUploadedImage(imageFile)
       : existingProduct.image || "";
 
   db.prepare(`
@@ -10785,7 +10910,7 @@ if (sortOrder < 1) {
 
   for (const galleryFile of galleryFiles) {
     const galleryImage =
-      saveUploadedImage(
+await saveUploadedImage(
         galleryFile,
         galleryAllowedTypes
       );
@@ -11538,7 +11663,7 @@ if (
 
           let image = "";
           try {
-            image = imageFile ? saveUploadedImage(imageFile) : "";
+            image = imageFile ? await saveUploadedImage(imageFile) : "";
           } catch (error) {
             return sendHtml(
               res,
@@ -11666,7 +11791,7 @@ if (
           let image = service.image;
           try {
             if (imageFile) {
-              image = saveUploadedImage(imageFile);
+              image = await saveUploadedImage(imageFile);
             }
           } catch (error) {
             return sendHtml(
@@ -11852,7 +11977,7 @@ if (
 
           let image = "";
           try {
-            image = imageFile ? saveUploadedImage(imageFile) : "";
+            image = imageFile ? await saveUploadedImage(imageFile) : "";
           } catch (error) {
             return sendHtml(
               res,
@@ -11973,7 +12098,7 @@ if (
           let image = project.image;
           try {
             if (imageFile) {
-              image = saveUploadedImage(imageFile);
+              image = await saveUploadedImage(imageFile);
             }
           } catch (error) {
             return sendHtml(
@@ -12170,7 +12295,7 @@ if (
 
           let image = "";
           try {
-            image = imageFile ? saveUploadedImage(imageFile) : "";
+            image = imageFile ? await saveUploadedImage(imageFile) : "";
           } catch (error) {
             return sendHtml(
               res,
@@ -12299,7 +12424,7 @@ if (
           let image = item.image;
           try {
             if (imageFile) {
-              image = saveUploadedImage(imageFile);
+              image = await saveUploadedImage(imageFile);
             }
           } catch (error) {
             return sendHtml(
@@ -12516,7 +12641,7 @@ if (
 
           try {
             if (imageFile) {
-              image = saveUploadedImage(imageFile);
+              image = await saveUploadedImage(imageFile);
             }
           } catch (error) {
             return sendHtml(
