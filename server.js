@@ -375,6 +375,12 @@ function renderPage(
 
   const publicPage =
     !pathname.startsWith("/admin") && !isAdmin(req);
+  const adminLoginPage = pathname === "/admin" && !isAdmin(req);
+  const adminPanelPage = isAdmin(req) && (
+    pathname.startsWith("/admin") ||
+    ["/catalog", "/orders", "/add-product"].includes(pathname) ||
+    pathname.startsWith("/edit-product/")
+  );
   const footerCategories = publicPage
     ? getCategories()
         .filter(category => category.parent_id === null && !category.hidden)
@@ -474,9 +480,10 @@ function renderPage(
   <title>${escapeHtml(title)}</title>
 
 ${publicPage ? '<link rel="stylesheet" href="/public/css/style.css">' : ""}
+${adminLoginPage || adminPanelPage ? '<link rel="stylesheet" href="/public/css/admin.css">' : ""}
 </head>
 
-<body class="${publicPage ? "public-page " : ""}${pathname === "/" ? "home-page" : pathname === "/catalog" ? "catalog-page" : pathname === "/services" ? "services-page" : /^\/product\/\d+$/.test(pathname) ? "product-page" : ""}">
+<body class="${adminLoginPage ? "admin-login-page " : ""}${adminPanelPage ? "admin-panel-page " : ""}${publicPage ? "public-page " : ""}${pathname === "/" ? "home-page" : pathname === "/catalog" ? "catalog-page" : pathname === "/services" ? "services-page" : /^\/product\/\d+$/.test(pathname) ? "product-page" : ""}">
 
 ${renderMenu(req)}
 
@@ -546,9 +553,13 @@ function renderMenu(req) {
         <summary>Категории каталога</summary>
         ${renderPublicCategories() || "<p>Категорий пока нет.</p>"}
       </details> |
-      <form method="GET" action="/catalog" style="display:inline-block;">
+      <form method="GET" action="/catalog" style="display:inline-block;position:relative;">
         <input type="search" name="search" placeholder="Поиск товара" aria-label="Поиск товаров">
         <button type="submit">Найти</button>
+        <div
+          id="search-suggestions"
+          style="display:none; position:absolute; top:100%; left:0; right:0; z-index:1000; background:white; border:1px solid #ccc; width:100%; box-sizing:border-box;"
+        ></div>
       </form> |
       <a href="/favorites">Избранное</a> |
       <a href="/cart">Корзина</a> |
@@ -2452,11 +2463,14 @@ const server =
 
         if (
           req.method === "GET" &&
-          path === "/public/css/style.css"
+          (path === "/public/css/style.css" || path === "/public/css/admin.css")
         ) {
           try {
+            const stylesheetName = path.endsWith("admin.css")
+              ? "admin.css"
+              : "style.css";
             const stylesheet = await fs.readFile(
-              pathModule.join(__dirname, "public", "css", "style.css")
+              pathModule.join(__dirname, "public", "css", stylesheetName)
             );
             res.writeHead(200, {
               "Content-Type": "text/css; charset=utf-8"
@@ -2466,6 +2480,7 @@ const server =
             return sendHtml(res, "Файл не найден", 404);
           }
         }
+
 
           if (
   req.method === "GET" &&
@@ -4566,42 +4581,6 @@ product.availability === "in_stock"
           Найдено товаров: ${products.length}
         </p>
 
-<form method="GET" action="/catalog">
-
-<div style="position:relative;">
-
-  <input
-    type="text"
-    name="search"
-    value="${escapeHtml(searchQuery)}"
-    placeholder="Поиск товара"
-  >
-
-  <div
-  id="search-suggestions"
-  style="
-    display:none;
-    position:absolute;
-    z-index:1000;
-    background:white;
-    border:1px solid #ccc;
-    width:100%;
-    box-sizing:border-box;
-  "
-></div>
-
-</div>
-
-${catalogStateHiddenHtml.replace(
-  /<input\s+type="hidden"\s+name="search"\s+value="[^"]*"\s*>\s*/i,
-  ""
-)}
-
-  <button type="submit">
-    Найти
-  </button>
-
-</form>
 
 
 <details id="catalog-filters">
@@ -4776,6 +4755,14 @@ ${catalogStateHiddenHtml.replace(
         ${productsHtml}
 
 <script>
+  const catalogFilters = document.getElementById("catalog-filters");
+  const publicSiteNav = document.querySelector("body.catalog-page > .public-site-nav");
+  const headerSearchForm = publicSiteNav?.querySelector('form[action="/catalog"]');
+
+  if (catalogFilters && headerSearchForm) {
+    headerSearchForm.after(catalogFilters);
+  }
+
   const searchInput =
     document.querySelector('input[name="search"]');
 
