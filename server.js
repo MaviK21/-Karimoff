@@ -5041,6 +5041,7 @@ if (
           <img
             src="${escapeHtml(galleryImage.image)}"
             alt="${escapeHtml(product.name)}"
+            class="product-gallery-image"
             width="150"
             style="margin:4px;"
           >
@@ -5218,6 +5219,7 @@ if (
                 <img
                   src="${escapeHtml(product.image)}"
                   alt="${escapeHtml(product.name)}"
+                  class="product-main-image"
                   style="max-width:600px;width:100%;height:auto;"
                 >
               </p>
@@ -5311,6 +5313,84 @@ if (
             `
             : ""
         }
+
+        <style>
+          @media (max-width: 640px) {
+            .product-main-image,
+            .product-gallery-image {
+              cursor: zoom-in;
+            }
+
+            .product-image-zoom {
+              position: fixed;
+              inset: 0;
+              z-index: 2000;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              padding: 16px;
+              background: rgba(0, 0, 0, 0.92);
+            }
+
+            .product-image-zoom img {
+              max-width: 100%;
+              max-height: 100%;
+              object-fit: contain;
+            }
+
+            .product-image-zoom button {
+              position: absolute;
+              top: 12px;
+              right: 12px;
+              padding: 8px 12px;
+              font-size: 18px;
+            }
+          }
+        </style>
+        <script>
+          (() => {
+            if (!window.matchMedia("(max-width: 640px)").matches) {
+              return;
+            }
+
+            const images = document.querySelectorAll(
+              ".product-main-image, .product-gallery-image"
+            );
+
+            images.forEach(image => {
+              image.addEventListener("click", event => {
+                event.preventDefault();
+                const overlay = document.createElement("div");
+                overlay.className = "product-image-zoom";
+                const closeButton = document.createElement("button");
+                closeButton.type = "button";
+                closeButton.setAttribute("aria-label", "Закрыть изображение");
+                closeButton.textContent = "Закрыть";
+                const zoomedImage = document.createElement("img");
+                zoomedImage.src = image.currentSrc || image.src;
+                zoomedImage.alt = image.alt;
+                overlay.append(closeButton, zoomedImage);
+                document.body.append(overlay);
+
+                const close = () => {
+                  overlay.remove();
+                  document.removeEventListener("keydown", onKeyDown);
+                };
+                const onKeyDown = event => {
+                  if (event.key === "Escape") {
+                    close();
+                  }
+                };
+                overlay.addEventListener("click", event => {
+                  if (event.target === overlay || event.target === closeButton) {
+                    close();
+                  }
+                });
+                document.addEventListener("keydown", onKeyDown);
+              });
+            });
+          })();
+        </script>
       `
     )
   );
