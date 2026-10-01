@@ -2714,6 +2714,12 @@ if (
                       </a>
                     </li>
 
+                    <li>
+                      <a href="/admin/pages">
+                        Страницы
+                      </a>
+                    </li>
+
                    </ul>
               `
             )
@@ -11891,6 +11897,274 @@ if (
           }
 
           return redirect(res, "/admin/main-banner");
+        }
+
+        // ==================================================
+        // СТРАНИЦЫ — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/pages"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const pages = db.prepare(`
+            SELECT *
+            FROM pages
+            ORDER BY sort_order, id
+          `).all();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Страницы",
+              `
+                <h1>Управление страницами</h1>
+                <p><a href="/admin">← Назад в админ-панель</a></p>
+
+                <h2>Создать страницу</h2>
+                <form method="POST" action="/admin/pages">
+                  <p>
+                    Название:
+                    <input type="text" name="name" required>
+                  </p>
+                  <p>
+                    URL/slug:
+                    <input type="text" name="slug" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*">
+                  </p>
+                  <p>
+                    Заголовок:
+                    <input type="text" name="title" required>
+                  </p>
+                  <p>
+                    Содержимое:
+                    <textarea name="content" required></textarea>
+                  </p>
+                  <p>
+                    Порядок отображения:
+                    <input type="number" name="sort_order" value="0">
+                  </p>
+                  <button type="submit">Создать страницу</button>
+                </form>
+
+                <h2>Страницы</h2>
+                <ul>
+                  ${pages.map(page => `
+                    <li>
+                      <strong>${escapeHtml(page.name)}</strong>
+                      — /${escapeHtml(page.slug)}
+                      — ${page.is_visible ? "показывается" : "скрыта"}
+                      — порядок: ${page.sort_order}
+                      <a href="/admin/pages/edit/${page.id}">Редактировать</a>
+                      <a href="/admin/pages/toggle/${page.id}">
+                        ${page.is_visible ? "Скрыть" : "Показать"}
+                      </a>
+                      <a
+                        href="/admin/pages/delete/${page.id}"
+                        onclick="return confirm('Удалить страницу?')"
+                      >Удалить</a>
+                    </li>
+                  `).join("")}
+                </ul>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // СТРАНИЦЫ — POST CREATE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path === "/admin/pages"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const params = await readBody(req);
+          const name = params.get("name")?.trim() || "";
+          const slug = (params.get("slug")?.trim() || "").toLowerCase();
+          const title = params.get("title")?.trim() || "";
+          const content = params.get("content")?.trim() || "";
+          const sortOrder = Number(params.get("sort_order") || 0);
+
+          if (
+            !name ||
+            !title ||
+            !content ||
+            !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) ||
+            !Number.isInteger(sortOrder) ||
+            sortOrder < 0
+          ) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>Проверьте поля страницы и формат slug.</h1>`),
+              400
+            );
+          }
+
+          if (db.prepare("SELECT 1 FROM pages WHERE slug = ?").get(slug)) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>Этот slug уже используется.</h1>`),
+              400
+            );
+          }
+
+          db.prepare(`
+            INSERT INTO pages (name, slug, title, content, sort_order, is_visible)
+            VALUES (?, ?, ?, ?, ?, 1)
+          `).run(name, slug, title, content, sortOrder);
+
+          return redirect(res, "/admin/pages");
+        }
+
+        // ==================================================
+        // СТРАНИЦЫ — EDIT GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/pages\/edit\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const page = db.prepare("SELECT * FROM pages WHERE id = ?").get(id);
+
+          if (!page) {
+            return sendHtml(res, renderPage(req, "Ошибка", `<h1>Страница не найдена.</h1>`), 404);
+          }
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Редактирование страницы",
+              `
+                <h1>Редактирование страницы</h1>
+                <form method="POST" action="/admin/pages/edit/${id}">
+                  <p>Название: <input type="text" name="name" value="${escapeHtml(page.name)}" required></p>
+                  <p>URL/slug: <input type="text" name="slug" value="${escapeHtml(page.slug)}" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*"></p>
+                  <p>Заголовок: <input type="text" name="title" value="${escapeHtml(page.title)}" required></p>
+                  <p>Содержимое: <textarea name="content" required>${escapeHtml(page.content)}</textarea></p>
+                  <p>Порядок отображения: <input type="number" name="sort_order" value="${page.sort_order}"></p>
+                  <button type="submit">Сохранить</button>
+                </form>
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // СТРАНИЦЫ — EDIT POST
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/admin\/pages\/edit\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          const existingPage = db.prepare("SELECT * FROM pages WHERE id = ?").get(id);
+
+          if (!existingPage) {
+            return sendHtml(res, renderPage(req, "Ошибка", `<h1>Страница не найдена.</h1>`), 404);
+          }
+
+          const params = await readBody(req);
+          const name = params.get("name")?.trim() || "";
+          const slug = (params.get("slug")?.trim() || "").toLowerCase();
+          const title = params.get("title")?.trim() || "";
+          const content = params.get("content")?.trim() || "";
+          const sortOrder = Number(params.get("sort_order") || 0);
+
+          if (
+            !name ||
+            !title ||
+            !content ||
+            !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) ||
+            !Number.isInteger(sortOrder) ||
+            sortOrder < 0
+          ) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>Проверьте поля страницы и формат slug.</h1>`),
+              400
+            );
+          }
+
+          if (db.prepare("SELECT 1 FROM pages WHERE slug = ? AND id <> ?").get(slug, id)) {
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>Этот slug уже используется.</h1>`),
+              400
+            );
+          }
+
+          db.prepare(`
+            UPDATE pages
+            SET name = ?, slug = ?, title = ?, content = ?, sort_order = ?
+            WHERE id = ?
+          `).run(name, slug, title, content, sortOrder, id);
+
+          return redirect(res, "/admin/pages");
+        }
+
+        // ==================================================
+        // СТРАНИЦЫ — TOGGLE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/pages\/toggle\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          db.prepare(`
+            UPDATE pages
+            SET is_visible = CASE is_visible WHEN 1 THEN 0 ELSE 1 END
+            WHERE id = ?
+          `).run(id);
+
+          return redirect(res, "/admin/pages");
+        }
+
+        // ==================================================
+        // СТРАНИЦЫ — DELETE
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/admin\/pages\/delete\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          db.prepare("DELETE FROM pages WHERE id = ?").run(id);
+          return redirect(res, "/admin/pages");
         }
 
         // ==================================================
