@@ -2690,13 +2690,19 @@ if (
                      </a>
                    </li>
 
-                   <li>
-                     <a href="/admin/services">
-                       Услуги
-                     </a>
-                   </li>
+                    <li>
+                      <a href="/admin/services">
+                        Услуги
+                      </a>
+                    </li>
 
                     <li>
+                      <a href="/admin/deleted-materials">
+                        Удалённые материалы
+                      </a>
+                    </li>
+
+                     <li>
                       <a href="/admin/projects">
                         Проекты
                       </a>
@@ -10744,6 +10750,79 @@ if (
 }
 
         // ==================================================
+        // УДАЛЁННЫЕ МАТЕРИАЛЫ — GET
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/admin/deleted-materials"
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const deletedServices = db.prepare(`
+            SELECT id, name, sort_order
+            FROM services
+            WHERE deleted = 1
+            ORDER BY sort_order, id
+          `).all();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Удалённые материалы",
+              `
+                <h1>Удалённые материалы</h1>
+                <p><a href="/admin">← Назад в админ-панель</a></p>
+                <h2>Удалённые услуги</h2>
+                ${
+                  deletedServices.length
+                    ? `
+                      <ul>
+                        ${deletedServices.map(service => `
+                          <li>
+                            <strong>${escapeHtml(service.name)}</strong>
+                            <form method="POST" action="/admin/deleted-materials/restore/${service.id}" style="display:inline">
+                              <button type="submit">Восстановить</button>
+                            </form>
+                          </li>
+                        `).join("")}
+                      </ul>
+                    `
+                    : "<p>Удалённых услуг нет.</p>"
+                }
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // ВОССТАНОВИТЬ УСЛУГУ
+        // ТОЛЬКО АДМИН
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          /^\/admin\/deleted-materials\/restore\/\d+$/.test(path)
+        ) {
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const id = Number(path.split("/")[4]);
+          db.prepare(`
+            UPDATE services
+            SET deleted = 0, is_visible = 1
+            WHERE id = ? AND deleted = 1
+          `).run(id);
+
+          return redirect(res, "/admin/deleted-materials");
+        }
+
+        // ==================================================
         // УСЛУГИ — GET
         // ТОЛЬКО АДМИН
         // ==================================================
@@ -10759,6 +10838,7 @@ if (
           const services = db.prepare(`
             SELECT *
             FROM services
+            WHERE deleted = 0
             ORDER BY sort_order, id
           `).all();
 
@@ -11060,13 +11140,12 @@ if (
           }
 
           const id = Number(path.split("/")[4]);
-          const service = db.prepare("SELECT image FROM services WHERE id = ?").get(id);
+          db.prepare(`
+            UPDATE services
+            SET deleted = 1, is_visible = 0
+            WHERE id = ? AND deleted = 0
+          `).run(id);
 
-          if (service?.image) {
-            await fs.unlink(pathModule.join(UPLOADS_DIR, pathModule.basename(service.image))).catch(() => {});
-          }
-
-          db.prepare("DELETE FROM services WHERE id = ?").run(id);
           return redirect(res, "/admin/services");
         }
 
