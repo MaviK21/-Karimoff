@@ -533,8 +533,9 @@ function renderMenu(req) {
       <nav>
         <a href="/">Главная</a> |
         <a href="/catalog">Каталог</a> |
-        <a href="/about">О нас</a> |
-        <a href="/service-request">Услуги / аренда</a> |
+      <a href="/about">О нас</a> |
+      <a href="/services">Услуги</a> |
+      <a href="/service-request">Услуги / аренда</a> |
         <a href="/cart">Корзина</a> |
         <a href="/admin">Админ-панель</a> |
         <a href="/orders">Заказы</a> |
@@ -2921,6 +2922,53 @@ if (
           );
         }
 
+
+        if (
+          req.method === "GET" &&
+          path === "/services"
+        ) {
+          const services = db.prepare(`
+            SELECT name, short_description, image
+            FROM services
+            WHERE is_visible = 1
+              AND deleted = 0
+            ORDER BY sort_order, id
+          `).all();
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Услуги",
+              `
+                <h1>Услуги</h1>
+                ${services.length > 0
+                  ? `
+                    <ul>
+                      ${services.map(service => `
+                        <li>
+                          <h2>${escapeHtml(service.name)}</h2>
+                          ${service.image
+                            ? `
+                              <p>
+                                <img
+                                  src="${escapeHtml(service.image)}"
+                                  alt="${escapeHtml(service.name)}"
+                                  style="max-width:200px; max-height:200px;"
+                                >
+                              </p>
+                            `
+                            : ""}
+                          <p>${escapeHtml(service.short_description || "")}</p>
+                        </li>
+                      `).join("")}
+                    </ul>
+                  `
+                  : "<p>Опубликованных услуг пока нет.</p>"}
+              `
+            )
+          );
+        }
 
         // ==================================================
         // АДМИН — GET
