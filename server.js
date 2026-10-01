@@ -4473,7 +4473,34 @@ ${catalogStateHiddenHtml.replace(
 
 </form>
 
-<details>
+<style>
+  @media (max-width: 640px) {
+    #catalog-filters[open] {
+      position: fixed;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      z-index: 1200;
+      box-sizing: border-box;
+      max-height: 85vh;
+      overflow-y: auto;
+      padding: 16px;
+      border-radius: 16px 16px 0 0;
+      background: #fff;
+      box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.2);
+    }
+
+    #catalog-filters[open] > summary {
+      position: sticky;
+      top: -16px;
+      z-index: 1;
+      padding: 12px 0;
+      background: #fff;
+    }
+  }
+</style>
+
+<details id="catalog-filters">
   <summary>Фильтры</summary>
 
   <form method="GET" action="/catalog">
