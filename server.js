@@ -499,13 +499,43 @@ function renderMenu(req) {
     `;
   }
 
+  const renderPublicCategories = (parentId = null) => {
+    const categories = getCategories()
+      .filter(category => !category.hidden && category.parent_id === parentId)
+      .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+
+    if (categories.length === 0) {
+      return "";
+    }
+
+    return `
+      <ul>
+        ${categories.map(category => `
+          <li>
+            <a href="/catalog?category=${category.id}">${escapeHtml(category.name)}</a>
+            ${renderPublicCategories(category.id)}
+          </li>
+        `).join("")}
+      </ul>
+    `;
+  };
+
   return `
     <nav>
       <a href="/">Главная</a> |
       <a href="/catalog">Каталог</a> |
+      <details style="display:inline-block;">
+        <summary>Категории каталога</summary>
+        ${renderPublicCategories() || "<p>Категорий пока нет.</p>"}
+      </details> |
+      <form method="GET" action="/catalog" style="display:inline-block;">
+        <input type="search" name="search" placeholder="Поиск товара" aria-label="Поиск товаров">
+        <button type="submit">Найти</button>
+      </form> |
+      <a href="/favorites">Избранное</a> |
+      <a href="/cart">Корзина</a> |
       <a href="/about">О нас</a> |
       <a href="/service-request">Услуги / аренда</a> |
-      <a href="/cart">Корзина</a> |
       <a href="/admin">Админ</a>
     </nav>
 
