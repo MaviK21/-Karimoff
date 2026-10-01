@@ -279,6 +279,100 @@ function renderPage(
   title,
   content
 ) {
+  const pathname = new URL(
+    req.url,
+    `http://${req.headers.host || "localhost"}`
+  ).pathname;
+  let breadcrumbs = "";
+
+  if (
+    req.method === "GET" &&
+    pathname !== "/" &&
+    !pathname.startsWith("/admin") &&
+    !isAdmin(req)
+  ) {
+    const breadcrumbItems = [
+      { label: "Главная", href: "/" }
+    ];
+    const requestUrl = new URL(
+      req.url,
+      `http://${req.headers.host || "localhost"}`
+    );
+
+    if (pathname === "/catalog") {
+      breadcrumbItems.push({ label: "Каталог", href: null });
+
+      const categoryId = Number(requestUrl.searchParams.get("category"));
+      if (Number.isInteger(categoryId) && categoryId > 0) {
+        const categories = getCategories();
+        const categoryPath = [];
+        let category = categories.find(item => item.id === categoryId);
+
+        while (category && categoryPath.length < 20) {
+          categoryPath.unshift(category);
+          category = categories.find(item => item.id === category.parent_id);
+        }
+
+        categoryPath.forEach((item, index) => {
+          breadcrumbItems.push({
+            label: item.name,
+            href: index === categoryPath.length - 1
+              ? null
+              : `/catalog?category=${item.id}`
+          });
+        });
+      }
+    } else if (/^\/product\/\d+$/.test(pathname)) {
+      breadcrumbItems.push({ label: "Каталог", href: "/catalog" });
+
+      const productId = Number(pathname.split("/")[2]);
+      const product = db.prepare(`
+        SELECT category_id
+        FROM products
+        WHERE id = ? AND deleted = 0
+      `).get(productId);
+      const categoryId = product
+        ? getProductCategoryIds(productId)[0] || product.category_id
+        : null;
+
+      if (categoryId) {
+        const categories = getCategories();
+        const categoryPath = [];
+        let category = categories.find(item => item.id === categoryId);
+
+        while (category && categoryPath.length < 20) {
+          categoryPath.unshift(category);
+          category = categories.find(item => item.id === category.parent_id);
+        }
+
+        categoryPath.forEach(item => {
+          breadcrumbItems.push({
+            label: item.name,
+            href: `/catalog?category=${item.id}`
+          });
+        });
+      }
+
+      breadcrumbItems.push({ label: title, href: null });
+    } else {
+      breadcrumbItems.push({ label: title, href: null });
+    }
+
+    breadcrumbs = `
+      <nav aria-label="Хлебные крошки">
+        <ol>
+          ${breadcrumbItems.map((item, index) => `
+            <li ${index === breadcrumbItems.length - 1 ? 'aria-current="page"' : ""}>
+              ${item.href
+                ? `<a href="${escapeHtml(item.href)}">${escapeHtml(item.label)}</a>`
+                : escapeHtml(item.label)}
+            </li>
+          `).join("")}
+        </ol>
+      </nav>
+    `;
+  }
+
   return `
 <!DOCTYPE html>
 <html lang="ru">
@@ -296,6 +390,8 @@ function renderPage(
 <body>
 
 ${renderMenu(req)}
+
+${breadcrumbs}
 
 ${content}
 
