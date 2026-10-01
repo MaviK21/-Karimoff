@@ -373,6 +373,54 @@ function renderPage(
     `;
   }
 
+  const publicPage =
+    !pathname.startsWith("/admin") && !isAdmin(req);
+  const footerCategories = publicPage
+    ? getCategories()
+        .filter(category => category.parent_id === null && !category.hidden)
+        .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id)
+    : [];
+  const footerServices = publicPage
+    ? db.prepare(`
+        SELECT id, name
+        FROM services
+        WHERE is_visible = 1 AND deleted = 0
+        ORDER BY sort_order, id
+      `).all()
+    : [];
+  const publicFooter = publicPage
+    ? `
+      <footer>
+        <hr>
+        <section>
+          <h2>Каталог</h2>
+          <ul>
+            ${footerCategories.map(category => `
+              <li><a href="/catalog?category=${category.id}">${escapeHtml(category.name)}</a></li>
+            `).join("")}
+          </ul>
+        </section>
+        <section>
+          <h2>Услуги</h2>
+          <ul>
+            ${footerServices.map(service => `
+              <li><a href="/service-request">${escapeHtml(service.name)}</a></li>
+            `).join("")}
+          </ul>
+        </section>
+        <nav aria-label="Основные разделы">
+          <a href="/">Главная</a> |
+          <a href="/catalog">Каталог</a> |
+          <a href="/about">О компании</a> |
+          <a href="/brands">Бренды</a> |
+          <a href="/service-request">Услуги / аренда</a> |
+          <a href="/cart">Корзина</a>
+        </nav>
+        <p>© ${new Date().getFullYear()} Karimoff</p>
+      </footer>
+    `
+    : "";
+
   const backToTop =
     !pathname.startsWith("/admin") && !isAdmin(req)
       ? `
@@ -420,6 +468,8 @@ ${renderMenu(req)}
 ${breadcrumbs}
 
 ${content}
+
+${publicFooter}
 
 ${backToTop}
 
