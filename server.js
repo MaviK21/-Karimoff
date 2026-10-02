@@ -2837,6 +2837,7 @@ if (
             SELECT title, short_text, image
             FROM news
             WHERE is_visible = 1
+              AND deleted = 0
             ORDER BY sort_order, id
           `).all();
 
@@ -3251,11 +3252,34 @@ if (
           path === "/projects"
         ) {
           const projects = db.prepare(`
-            SELECT name, description, image
+            SELECT id, name, description, image
             FROM projects
             WHERE is_visible = 1
             ORDER BY sort_order, id
           `).all();
+
+          const projectImagesStmt = db.prepare(`
+            SELECT image
+            FROM project_images
+            WHERE project_id = ?
+            ORDER BY sort_order, id
+          `);
+
+          function projectImageList(project) {
+            const images = [];
+            const seen = new Set();
+            if (project.image) {
+              images.push(project.image);
+              seen.add(project.image);
+            }
+            for (const row of projectImagesStmt.all(project.id)) {
+              if (!seen.has(row.image)) {
+                images.push(row.image);
+                seen.add(row.image);
+              }
+            }
+            return images;
+          }
 
           return sendHtml(
             res,
@@ -3270,17 +3294,15 @@ if (
                       ${projects.map(project => `
                         <li>
                           <h2>${escapeHtml(project.name)}</h2>
-                          ${project.image
-                            ? `
-                              <p>
-                                <img
-                                  src="${escapeHtml(project.image)}"
-                                  alt="${escapeHtml(project.name)}"
-                                  style="max-width:200px; max-height:200px;"
-                                >
-                              </p>
-                            `
-                            : ""}
+                          ${projectImageList(project).map((img, idx) => `
+                            <p>
+                              <img
+                                src="${escapeHtml(img)}"
+                                alt="${escapeHtml(project.name)}${idx === 0 ? "" : " — фото " + (idx + 1)}"
+                                style="max-width:200px; max-height:200px;"
+                              >
+                            </p>
+                          `).join("")}
                           <p>${escapeHtml(project.description || "")}</p>
                         </li>
                       `).join("")}
@@ -12263,8 +12285,13 @@ if (
                   </p>
 
                   <p>
-                    Изображение:
+                    Главное изображение:
                     <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                  </p>
+
+                  <p>
+                    Дополнительные изображения:
+                    <input type="file" name="gallery" accept="image/jpeg,image/png,image/webp" multiple>
                   </p>
 
                   <p>
@@ -12321,6 +12348,7 @@ if (
           const description = params.get("description")?.trim() || "";
           const sortOrder = Number(params.get("sort_order") || 0);
           const imageFile = params.getFile("image");
+          const galleryFiles = params.getAllFiles("gallery");
 
           if (
             !name ||
@@ -12350,10 +12378,27 @@ if (
             );
           }
 
-          db.prepare(`
+          const result = db.prepare(`
             INSERT INTO projects (name, description, image, sort_order, is_visible)
             VALUES (?, ?, ?, ?, 1)
           `).run(name, description, image, sortOrder);
+
+          const newProjectId = Number(result.lastInsertRowid);
+          let gallerySortOrder = 0;
+          for (const galleryFile of galleryFiles) {
+            const galleryImage = await saveUploadedImage(galleryFile, {
+              "image/jpeg": ".jpg",
+              "image/png": ".png",
+              "image/webp": ".webp"
+            });
+            if (!galleryImage) {
+              continue;
+            }
+            db.prepare(`
+              INSERT INTO project_images (project_id, image, sort_order)
+              VALUES (?, ?, ?)
+            `).run(newProjectId, galleryImage, gallerySortOrder++);
+          }
 
           return redirect(res, "/admin/projects");
         }
@@ -12378,6 +12423,8 @@ if (
             return sendHtml(res, renderPage(req, "Ошибка", `<h1>Проект не найден.</h1>`), 404);
           }
 
+          const existingGallery = db.prepare("SELECT image FROM project_images WHERE project_id = ? ORDER BY sort_order, id").all(id);
+
           return sendHtml(
             res,
             renderPage(
@@ -12398,10 +12445,16 @@ if (
                   </p>
 
                   <p>
-                    Изображение:
+                    Главное изображение:
                     <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
                     ${project.image ? `<br><img src="${escapeHtml(project.image)}" alt="${escapeHtml(project.name)}" width="150">` : ""}
                   </p>
+
+                  <p>
+                    Дополнительные изображения:
+                    <input type="file" name="gallery" accept="image/jpeg,image/png,image/webp" multiple>
+                  </p>
+                  ${existingGallery.map(img => `<img src="${escapeHtml(img.image)}" alt="Дополнительное изображение проекта" width="100">`).join("")}
 
                   <p>
                     Порядок отображения:
@@ -12441,6 +12494,7 @@ if (
           const description = params.get("description")?.trim() || "";
           const sortOrder = Number(params.get("sort_order") || 0);
           const imageFile = params.getFile("image");
+          const galleryFiles = params.getAllFiles("gallery");
 
           if (
             !name ||
@@ -12477,6 +12531,27 @@ if (
             SET name = ?, description = ?, image = ?, sort_order = ?
             WHERE id = ?
           `).run(name, description, image, sortOrder, id);
+
+          let gallerySortOrder = db.prepare(`
+            SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+            FROM project_images
+            WHERE project_id = ?
+          `).get(id).next_sort_order;
+
+          for (const galleryFile of galleryFiles) {
+            const galleryImage = await saveUploadedImage(galleryFile, {
+              "image/jpeg": ".jpg",
+              "image/png": ".png",
+              "image/webp": ".webp"
+            });
+            if (!galleryImage) {
+              continue;
+            }
+            db.prepare(`
+              INSERT INTO project_images (project_id, image, sort_order)
+              VALUES (?, ?, ?)
+            `).run(id, galleryImage, gallerySortOrder++);
+          }
 
           return redirect(res, "/admin/projects");
         }
@@ -12584,6 +12659,11 @@ if (
                   </p>
 
                   <p>
+                    Дополнительные изображения:
+                    <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp,image/gif">
+                  </p>
+
+                  <p>
                     Порядок отображения:
                     <input type="number" name="sort_order" value="0">
                   </p>
@@ -12638,6 +12718,7 @@ if (
           const fullText = params.get("full_text")?.trim() || "";
           const sortOrder = Number(params.get("sort_order") || 0);
           const imageFile = params.getFile("image");
+          const galleryFiles = params.getAllFiles("gallery");
 
           if (
             !title ||
@@ -12668,11 +12749,24 @@ if (
             );
           }
 
-          db.prepare(`
+          const result = db.prepare(`
             INSERT INTO news
             (title, short_text, full_text, image, sort_order, is_visible)
             VALUES (?, ?, ?, ?, ?, 1)
           `).run(title, shortText, fullText, image, sortOrder);
+
+          const newId = Number(result.lastInsertRowid);
+          let gallerySortOrder = 0;
+          for (const galleryFile of galleryFiles) {
+            const galleryImage = await saveUploadedImage(galleryFile);
+            if (!galleryImage) {
+              continue;
+            }
+            db.prepare(`
+              INSERT INTO news_images (news_id, image, sort_order)
+              VALUES (?, ?, ?)
+            `).run(newId, galleryImage, gallerySortOrder++);
+          }
 
           return redirect(res, "/admin/news");
         }
@@ -12696,6 +12790,33 @@ if (
           if (!item) {
             return sendHtml(res, renderPage(req, "Ошибка", `<h1>Новость не найдена.</h1>`), 404);
           }
+
+          const galleryItems = db.prepare(
+            "SELECT * FROM news_images WHERE news_id = ? ORDER BY sort_order, id"
+          ).all(id);
+
+          const galleryHtml = galleryItems.length
+            ? `
+                <p>
+                  Загрузить дополнительные изображения:
+                  <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp,image/gif">
+                </p>
+                <fieldset>
+                  <legend>Дополнительные изображения</legend>
+                  ${galleryItems.map(galleryItem => `
+                    <label style="display:inline-block;margin-right:12px;vertical-align:top;text-align:center">
+                      <img src="${escapeHtml(galleryItem.image)}" alt="" width="120"><br>
+                      <input type="checkbox" name="remove_gallery" value="${galleryItem.id}"> Удалить
+                    </label>
+                  `).join("")}
+                </fieldset>
+              `
+            : `
+                <p>
+                  Загрузить дополнительные изображения:
+                  <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp,image/gif">
+                </p>
+              `;
 
           return sendHtml(
             res,
@@ -12726,6 +12847,8 @@ if (
                     <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
                     ${item.image ? `<br><img src="${escapeHtml(item.image)}" alt="${escapeHtml(item.title)}" width="150">` : ""}
                   </p>
+
+                  ${galleryHtml}
 
                   <p>
                     Порядок отображения:
@@ -12766,6 +12889,8 @@ if (
           const fullText = params.get("full_text")?.trim() || "";
           const sortOrder = Number(params.get("sort_order") || 0);
           const imageFile = params.getFile("image");
+          const galleryFiles = params.getAllFiles("gallery");
+          const removeGalleryIds = params.getAll("remove_gallery").map(Number).filter(Number.isInteger);
 
           if (
             !title ||
@@ -12803,6 +12928,26 @@ if (
             SET title = ?, short_text = ?, full_text = ?, image = ?, sort_order = ?
             WHERE id = ?
           `).run(title, shortText, fullText, image, sortOrder, id);
+
+          const deleteGallery = db.prepare("DELETE FROM news_images WHERE news_id = ? AND id = ?");
+          for (const removeId of removeGalleryIds) {
+            deleteGallery.run(id, removeId);
+          }
+
+          const existingSort = db.prepare(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM news_images WHERE news_id = ?"
+          ).get(id);
+          let gallerySortOrder = existingSort.next;
+          const insertGallery = db.prepare(
+            "INSERT INTO news_images (news_id, image, sort_order) VALUES (?, ?, ?)"
+          );
+          for (const galleryFile of galleryFiles) {
+            const galleryImage = await saveUploadedImage(galleryFile);
+            if (!galleryImage) {
+              continue;
+            }
+            insertGallery.run(id, galleryImage, gallerySortOrder++);
+          }
 
           return redirect(res, "/admin/news");
         }
