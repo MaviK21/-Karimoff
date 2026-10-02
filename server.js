@@ -356,6 +356,9 @@ function renderPage(
       }
 
       breadcrumbItems.push({ label: title, href: null });
+    } else if (/^\/brand\/\d+$/.test(pathname)) {
+      breadcrumbItems.push({ label: "Бренды", href: "/brands" });
+      breadcrumbItems.push({ label: title, href: null });
     } else {
       breadcrumbItems.push({ label: title, href: null });
     }
@@ -392,6 +395,19 @@ function renderPage(
         ORDER BY sort_order, id
       `).all()
     : [];
+  const footerContacts = publicPage
+    ? getContactSettings()
+    : null;
+  const footerMessengerLinks = footerContacts
+    ? [
+        { key: "contact_telegram", label: "Telegram" },
+        { key: "contact_whatsapp", label: "WhatsApp" },
+        { key: "contact_viber", label: "Viber" },
+        { key: "contact_vk", label: "VK" },
+        { key: "contact_instagram", label: "Instagram" },
+        { key: "contact_facebook", label: "Facebook" }
+      ].filter(messenger => footerContacts[messenger.key])
+    : [];
   const publicFooter = publicPage
     ? `
       <footer>
@@ -408,18 +424,29 @@ function renderPage(
           <h2>Услуги</h2>
           <ul>
             ${footerServices.map(service => `
-              <li><a href="/service-request">${escapeHtml(service.name)}</a></li>
+              <li><a href="/services">${escapeHtml(service.name)}</a></li>
             `).join("")}
           </ul>
         </section>
-        <nav aria-label="Основные разделы">
-          <a href="/">Главная</a> |
-          <a href="/catalog">Каталог</a> |
-          <a href="/about">О компании</a> |
-          <a href="/brands">Бренды</a> |
-          <a href="/service-request">Услуги / аренда</a> |
-          <a href="/cart">Корзина</a>
-        </nav>
+        <section>
+          <h2>Компания</h2>
+          <ul>
+            <li><a href="/about">О компании</a></li>
+            <li><a href="/brands">Бренды</a></li>
+            <li><a href="/news">Новости</a></li>
+            <li><a href="/projects">Проекты</a></li>
+          </ul>
+        </section>
+        <section>
+          <h2>Контакты</h2>
+          ${footerContacts?.contact_phone ? `<p>Телефон: <a href="tel:${escapeHtml(footerContacts.contact_phone)}">${escapeHtml(footerContacts.contact_phone)}</a></p>` : ""}
+          ${footerContacts?.contact_email ? `<p>Email: <a href="mailto:${escapeHtml(footerContacts.contact_email)}">${escapeHtml(footerContacts.contact_email)}</a></p>` : ""}
+          ${footerContacts?.contact_address ? `<p>Адрес: ${escapeHtml(footerContacts.contact_address)}</p>` : ""}
+          ${footerContacts?.contact_working_hours ? `<p>Время работы: ${escapeHtml(footerContacts.contact_working_hours)}</p>` : ""}
+          ${footerMessengerLinks.length > 0
+            ? `<p>${footerMessengerLinks.map(messenger => `<a href="${escapeHtml(footerContacts[messenger.key])}" target="_blank" rel="noopener">${messenger.label}</a>`).join(" | ")}</p>`
+            : ""}
+        </section>
         <p>© ${new Date().getFullYear()} Karimoff</p>
       </footer>
     `
@@ -430,10 +457,23 @@ function renderPage(
       <nav class="mobile-bottom-nav" aria-label="Мобильная навигация">
         <a href="/">Главная</a>
         <a href="/catalog">Каталог</a>
-        <a href="/catalog">Поиск</a>
+        <a href="/catalog" class="mobile-nav-search">Поиск</a>
         <a href="/favorites">Избранное</a>
         <a href="/cart">Корзина</a>
       </nav>
+      <script>
+        document.querySelectorAll(".mobile-nav-search").forEach(link => {
+          link.addEventListener("click", event => {
+            const searchInput = document.querySelector(".public-site-nav input[type=\"search\"]");
+            if (!searchInput) {
+              return;
+            }
+            event.preventDefault();
+            searchInput.scrollIntoView({ block: "center" });
+            searchInput.focus();
+          });
+        });
+      </script>
     `
     : "";
 
@@ -495,6 +535,108 @@ function renderPage(
       `
       : "";
 
+  const floatingContacts =
+    publicPage
+      ? (() => {
+          const contacts = getContactSettings();
+
+          // ДЕМО-Шаблон панели контактов: показываются все 4 канала из ТЗ.
+          // Демонстрационные значения подставляются только пока соответствующая
+          // настройка в /admin/contacts не заполнена; в БД они не записываются.
+          const iconPhone =
+            `<circle cx="12" cy="12" r="11" fill="#245b82"/><path fill="#fff" transform="translate(4.55 4.55) scale(0.62)" d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.21c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>`;
+          const iconTelegram =
+            `<circle cx="12" cy="12" r="11" fill="#229ED9"/><path fill="#fff" d="M4.4 11.6l14.6-5.6c.7-.27 1.3.2 1.05 1.13l-2.5 11.75c-.18.84-.68 1.04-1.4.64l-3.9-2.87-1.88 1.82c-.2.2-.38.37-.8.37l.29-4.03 7.3-6.6c.32-.28-.07-.44-.5-.16l-9 5.67-3.9-1.22c-.85-.27-.87-.85-.06-1.17z"/>`;
+          const iconWhatsApp =
+            `<circle cx="12" cy="12" r="11" fill="#25D366"/><path fill="#fff" d="M12 3.6c-4.8 0-8.7 3.7-8.7 8.2 0 2.4 1.1 4.5 2.8 6l-.9 2.9 3.2-1.1c1.1.5 2.3.8 3.6.8 4.8 0 8.7-3.7 8.7-8.2S16.8 3.6 12 3.6z"/><path fill="#25D366" transform="translate(5.2 5.2) scale(0.57)" d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.21c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>`;
+          const iconViber =
+            `<circle cx="12" cy="12" r="11" fill="#7360F2"/><path fill="#fff" d="M12 3.6c-4.8 0-8.7 3.7-8.7 8.2 0 2.4 1.1 4.5 2.8 6l-.9 2.9 3.2-1.1c1.1.5 2.3.8 3.6.8 4.8 0 8.7-3.7 8.7-8.2S16.8 3.6 12 3.6z"/><path fill="#7360F2" transform="translate(5.2 5.2) scale(0.57)" d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.21c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>`;
+
+          const renderIcon = inner =>
+            `<svg class="floating-contacts-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">${inner}</svg>`;
+
+          const channels = [
+            {
+              icon: iconPhone,
+              label: `Телефон: ${contacts.contact_phone || "+375 (29) 000-00-00"}`,
+              href: `tel:${contacts.contact_phone || "+375290000000"}`
+            },
+            {
+              icon: iconTelegram,
+              label: `Telegram: ${contacts.contact_telegram || "@karimoff_demo"}`,
+              href: contacts.contact_telegram || "https://t.me/karimoff_demo"
+            },
+            {
+              icon: iconWhatsApp,
+              label: `WhatsApp: ${contacts.contact_whatsapp || "+375 (29) 000-00-00"}`,
+              href: contacts.contact_whatsapp || "https://wa.me/375290000000"
+            },
+            {
+              icon: iconViber,
+              label: `Viber: ${contacts.contact_viber || "+375 (29) 000-00-00"}`,
+              href: contacts.contact_viber || "viber://chat?number=%2B375290000000"
+            }
+          ];
+
+          const contactLinks =
+            channels.map(channel => `
+              <a class="floating-contacts-channel" href="${escapeHtml(channel.href)}"${channel.href.startsWith("tel:") ? "" : ' target="_blank" rel="noopener"'}>
+                ${renderIcon(channel.icon)}
+                <span>${escapeHtml(channel.label)}</span>
+              </a>
+            `).join("")
+            + `<a class="floating-contacts-callback" href="/callback-request">Обратный звонок</a>`;
+
+          return `
+            <div class="floating-contacts" id="floating-contacts">
+              <div class="floating-contacts-panel" id="floating-contacts-panel" hidden>
+                ${contactLinks}
+              </div>
+              <button
+                id="floating-contacts-toggle"
+                type="button"
+                aria-label="Контакты"
+                aria-expanded="false"
+              ><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path fill="#fff" d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.21c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg></button>
+            </div>
+            <script>
+              (() => {
+                const container = document.getElementById("floating-contacts");
+                const toggle = document.getElementById("floating-contacts-toggle");
+                const panel = document.getElementById("floating-contacts-panel");
+
+                if (!toggle || !panel) {
+                  return;
+                }
+
+                const closePanel = () => {
+                  panel.hidden = true;
+                  toggle.setAttribute("aria-expanded", "false");
+                };
+
+                toggle.addEventListener("click", event => {
+                  event.stopPropagation();
+                  panel.hidden = !panel.hidden;
+                  toggle.setAttribute("aria-expanded", panel.hidden ? "false" : "true");
+                });
+
+                document.addEventListener("click", event => {
+                  if (!panel.hidden && !container.contains(event.target)) {
+                    closePanel();
+                  }
+                });
+
+                document.addEventListener("keydown", event => {
+                  if (event.key === "Escape") {
+                    closePanel();
+                  }
+                });
+              })();
+            </script>
+          `;
+        })()
+      : "";
+
   return `
 <!DOCTYPE html>
 <html lang="ru">
@@ -525,6 +667,8 @@ ${publicFooter}
 ${cookieNotice}
 
 ${mobileNavigation}
+
+${floatingContacts}
 
 ${backToTop}
 
@@ -580,13 +724,37 @@ function renderMenu(req, adminPanelPage = false) {
     `;
   };
 
+  const megaMenuCategories = getCategories()
+    .filter(category => !category.hidden && category.parent_id === null)
+    .sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+
+  const cartContents = getCart(req);
+  const cartCount = Object
+    .values(cartContents)
+    .reduce((sum, quantity) => sum + Math.max(1, Number(quantity) || 1), 0);
+  const favoritesCount = getFavorites(req).length;
+  const headerContacts = getContactSettings();
+
   return `
     <nav class="public-site-nav">
       <a href="/">Главная</a> |
-      <a href="/catalog">Каталог</a> |
-      <details style="display:inline-block;">
-        <summary>Категории каталога</summary>
-        ${renderPublicCategories() || "<p>Категорий пока нет.</p>"}
+      <details class="catalog-mega-menu">
+        <summary>Каталог</summary>
+        <div class="mega-menu">
+          <p class="mega-menu-all">
+            <a href="/catalog">Весь каталог</a>
+          </p>
+          ${
+            megaMenuCategories.length > 0
+              ? megaMenuCategories.map(category => `
+                  <div class="mega-menu-column">
+                    <a class="mega-menu-title" href="/catalog?category=${category.id}">${escapeHtml(category.name)}</a>
+                    ${renderPublicCategories(category.id)}
+                  </div>
+                `).join("")
+              : "<p>Категорий пока нет.</p>"
+          }
+        </div>
       </details> |
       <form method="GET" action="/catalog" style="display:inline-block;position:relative;">
         <input type="search" name="search" placeholder="Поиск товара" aria-label="Поиск товаров">
@@ -596,12 +764,12 @@ function renderMenu(req, adminPanelPage = false) {
           style="display:none; position:absolute; top:100%; left:0; right:0; z-index:1000; background:white; border:1px solid #ccc; width:100%; box-sizing:border-box;"
         ></div>
       </form> |
-      <a href="/favorites">Избранное</a> |
-      <a href="/cart">Корзина</a> |
-      <a href="/about">О нас</a> |
+      ${headerContacts.contact_phone ? `<a href="tel:${escapeHtml(headerContacts.contact_phone)}">${escapeHtml(headerContacts.contact_phone)}</a> |` : ""}
+      <a href="/favorites">Избранное${favoritesCount > 0 ? ` (${favoritesCount})` : ""}</a> |
+      <a href="/cart">Корзина${cartCount > 0 ? ` (${cartCount})` : ""}</a> |
+      <a href="/services">Услуги</a> |
       <a href="/news">Новости</a> |
-      <a href="/projects">Проекты</a> |
-      <a href="/service-request">Услуги / аренда</a>
+      <a href="/projects">Проекты</a>
 
     </nav>
 
@@ -1001,6 +1169,21 @@ function saveServiceCharacteristics(serviceId, params, replaceExisting = false) 
   });
 
   save();
+}
+
+// Разбирает тип услуги и минимальные часы аренды.
+// Для Service всегда возвращается minRentalHours = 2 (значение по умолчанию).
+function getServiceTypeFields(params) {
+  const serviceType = params.get("service_type") === "Rental" ? "Rental" : "Service";
+
+  if (serviceType !== "Rental") {
+    return { serviceType, minRentalHours: 2 };
+  }
+
+  const rawHours = Number(params.get("min_rental_hours"));
+  const minRentalHours = Number.isInteger(rawHours) && rawHours > 0 ? rawHours : 2;
+
+  return { serviceType, minRentalHours };
 }
 
 function getServiceTariffs(params) {
@@ -2277,6 +2460,156 @@ function getProductCharacteristics(
     .all(productId);
 }
 
+// Топ-3 характеристики сразу для нескольких товаров (для сеток карточек).
+function getProductCardCharacteristics(productIds) {
+  const map = new Map();
+  const ids = [...new Set(productIds.filter(Number.isInteger))];
+
+  if (ids.length === 0) {
+    return map;
+  }
+
+  const placeholders = ids.map(() => "?").join(",");
+
+  const rows = db.prepare(`
+    SELECT pc.product_id, c.name, pc.value
+    FROM product_characteristics pc
+    JOIN characteristics c ON c.id = pc.characteristic_id
+    WHERE pc.product_id IN (${placeholders})
+    ORDER BY c.id
+  `).all(...ids);
+
+  for (const row of rows) {
+    if (!map.has(row.product_id)) {
+      map.set(row.product_id, []);
+    }
+    if (map.get(row.product_id).length < 3) {
+      map.get(row.product_id).push({ name: row.name, value: row.value });
+    }
+  }
+
+  return map;
+}
+
+// Названия брендов для списка товаров (для карточек).
+function getBrandNamesByIds(brandIds) {
+  const map = new Map();
+  const ids = [...new Set(brandIds.filter(Number.isInteger))];
+
+  if (ids.length === 0) {
+    return map;
+  }
+
+  const placeholders = ids.map(() => "?").join(",");
+
+  const rows = db.prepare(`
+    SELECT id, name
+    FROM brands
+    WHERE id IN (${placeholders})
+  `).all(...ids);
+
+  for (const row of rows) {
+    map.set(row.id, row.name);
+  }
+
+  return map;
+}
+
+// Единая карточка товара для публичных списков:
+// каталог, главная, рекомендации, избранное, страница бренда.
+function renderProductCard(product, options = {}) {
+  const favoriteIds = options.favoriteIds || [];
+  const characteristics = (options.characteristics || []).slice(0, 3);
+  const brandName = options.brandName || "";
+  const sku = String(product.sku || "").trim();
+  const currency = escapeHtml(product.currency || "BYN");
+  const discountPercent = Number(product.discount_percent) || 0;
+  const hasDiscount = discountPercent > 0 && !product.price_on_request;
+  const discountedPrice = hasDiscount
+    ? product.price * (1 - discountPercent / 100)
+    : product.price;
+  const discountedPriceText = Number.isInteger(discountedPrice)
+    ? String(discountedPrice)
+    : discountedPrice.toFixed(2);
+
+  const badges = [
+    discountPercent > 0
+      ? `<span class="product-card-badge product-card-badge--discount">Акция</span>`
+      : "",
+    product.is_hit
+      ? `<span class="product-card-badge product-card-badge--hit">Хит</span>`
+      : "",
+    product.is_new
+      ? `<span class="product-card-badge product-card-badge--new">Новинка</span>`
+      : ""
+  ].filter(Boolean).join("");
+
+  const metaParts = [
+    brandName ? `Бренд: ${escapeHtml(brandName)}` : "",
+    sku ? `Артикул: ${escapeHtml(sku)}` : ""
+  ].filter(Boolean);
+
+  const stockLabels = {
+    in_stock: "В наличии",
+    on_order: "Под заказ",
+    out_of_stock: "Нет в наличии"
+  };
+  const stock = product.availability
+    ? `<p class="product-card-stock product-card-stock--${escapeHtml(product.availability)}">${escapeHtml(stockLabels[product.availability] || "Нет в наличии")}</p>`
+    : "";
+
+  const priceHtml = product.price_on_request
+    ? `<p class="product-card-price"><span class="product-card-price-current">Цена по запросу</span></p>`
+    : `
+      <p class="product-card-price">
+        ${hasDiscount ? `<s class="product-card-price-old">${escapeHtml(product.price)} ${currency}</s>` : ""}
+        <span class="product-card-price-current">${hasDiscount ? discountedPriceText : escapeHtml(product.price)} ${currency}</span>
+        ${hasDiscount ? `<span class="product-card-price-discount">−${discountPercent}%</span>` : ""}
+      </p>`;
+
+  const specsHtml = characteristics.length
+    ? `<ul class="product-card-specs">${characteristics.map(item => `
+        <li>
+          <span class="product-card-spec-name">${escapeHtml(item.name)}</span>
+          <span class="product-card-spec-value">${escapeHtml(item.value)}</span>
+        </li>`).join("")}</ul>`
+    : "";
+
+  const isFavorite = favoriteIds.includes(product.id);
+
+  const adminActions = options.admin
+    ? `<p class="product-card-admin">
+        <a href="/edit-product/${product.id}">Редактировать</a>
+        <a href="/delete-product/${product.id}" onclick="return confirm('Удалить товар?')">Удалить</a>
+      </p>`
+    : "";
+
+  return `
+    <li class="product-card">
+      <a class="product-card-media" href="/product/${product.id}">
+        ${product.image
+          ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" loading="lazy">`
+          : `<span class="product-card-media-placeholder" aria-hidden="true">Нет фото</span>`}
+        ${badges ? `<span class="product-card-badges">${badges}</span>` : ""}
+      </a>
+      <div class="product-card-body">
+        <a class="product-card-name" href="/product/${product.id}">${escapeHtml(product.name)}</a>
+        ${metaParts.length ? `<p class="product-card-meta">${metaParts.join(" · ")}</p>` : ""}
+        ${specsHtml}
+        ${stock}
+      </div>
+      <div class="product-card-footer">
+        ${priceHtml}
+        <div class="product-card-actions">
+          <a class="product-card-action product-card-action--cart" href="/cart/add/${product.id}">В корзину</a>
+          <a class="product-card-action product-card-action--favorite" href="/favorites/toggle/${product.id}">${isFavorite ? "Убрать из избранного" : "В избранное"}</a>
+        </div>
+        ${adminActions}
+      </div>
+    </li>
+  `;
+}
+
 
 function getCategoryCharacteristicRows() {
   return db
@@ -2636,6 +2969,36 @@ function getCartItems(req) {
 }
 
 
+function getFavorites(req) {
+  const cookies =
+    parseCookies(req);
+
+  try {
+    const value =
+      JSON.parse(cookies.favs || "[]");
+
+    return Array.isArray(value)
+      ? value.map(Number).filter(Number.isInteger)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+
+function setFavorites(res, favorites) {
+  const value =
+    encodeURIComponent(
+      JSON.stringify(favorites)
+    );
+
+  res.setHeader(
+    "Set-Cookie",
+    `favs=${value}; Path=/; Max-Age=2592000; SameSite=Lax`
+  );
+}
+
+
 // ======================================================
 // SERVER
 // ======================================================
@@ -2823,6 +3186,7 @@ if (
             SELECT name, short_description, image
             FROM services
             WHERE is_visible = 1
+              AND deleted = 0
             ORDER BY sort_order, id
           `).all();
 
@@ -2856,17 +3220,31 @@ if (
               p.image,
               p.price,
               p.currency,
+              p.sku,
+              p.is_new,
+              p.is_hit,
+              p.availability,
               p.discount_percent,
               p.price_on_request,
+              b.name AS brand_name,
               MIN(pr.sort_order) AS recommendation_order,
               MIN(pr.id) AS recommendation_id
             FROM product_recommendations pr
             JOIN products p
               ON p.id = pr.recommended_product_id
+            LEFT JOIN brands b
+              ON b.id = p.brand_id
             WHERE p.deleted = 0
             GROUP BY p.id
             ORDER BY recommendation_order, recommendation_id
           `).all();
+
+          const homeCardCharacteristics =
+            getProductCardCharacteristics(
+              recommendedProducts.map(product => product.id)
+            );
+
+          const homeFavoriteIds = getFavorites(req);
 
           const aboutPage = db.prepare(`
             SELECT title, content
@@ -2878,6 +3256,15 @@ if (
           const aboutPreview = aboutPage
             ? aboutPage.content.trim().split(/\s+/).slice(0, 35).join(" ")
             : "";
+
+          const mainCategories = db.prepare(`
+            SELECT id, name
+            FROM categories
+            WHERE parent_id IS NULL
+            ORDER BY sort_order, id
+          `).all();
+
+          const contacts = getContactSettings();
 
           return sendHtml(
             res,
@@ -2921,11 +3308,41 @@ if (
                   на сайт Karimoff!
                 </p>
 
-                <p>
-                  <a href="/catalog">
-                    Перейти в каталог
-                  </a>
+                <p class="home-cta">
+                  <a class="cta-button" href="/catalog">Каталог</a>
+                  <a class="cta-button" href="/services">Услуги</a>
+                  <a class="cta-button" href="/#contacts">Контакты</a>
                 </p>
+
+                <h2>Основные направления</h2>
+
+                <ul>
+                  <li>
+                    <a href="/catalog">Продажа техники</a>
+                  </li>
+                  <li>
+                    <a href="/repair-request">Ремонт</a>
+                  </li>
+                  <li>
+                    <a href="/services">Услуги под ключ</a>
+                  </li>
+                </ul>
+
+                ${
+                  mainCategories.length > 0
+                    ? `
+                      <h2>Основные категории каталога</h2>
+
+                      <ul>
+                        ${mainCategories.map(category => `
+                          <li>
+                            <a href="/catalog?category=${category.id}">${escapeHtml(category.name)}</a>
+                          </li>
+                        `).join("")}
+                      </ul>
+                    `
+                    : ""
+                }
 
                 ${
                   aboutPage
@@ -3045,49 +3462,24 @@ if (
                   recommendedProducts.length > 0
                     ? `
                       <h2>Рекомендуемые товары</h2>
-                      <ul>
-                        ${recommendedProducts.map(product => {
-                          const discountPercent = Number(product.discount_percent) || 0;
-                          const discountedPrice = discountPercent > 0
-                            ? product.price * (1 - discountPercent / 100)
-                            : product.price;
-
-                          return `
-                            <li>
-                              ${
-                                product.image
-                                  ? `
-                                    <p>
-                                      <img
-                                        src="${escapeHtml(product.image)}"
-                                        alt="${escapeHtml(product.name)}"
-                                        style="max-width:200px; max-height:200px;"
-                                      >
-                                    </p>
-                                  `
-                                  : ""
-                              }
-                              <p>
-                                <a href="/product/${product.id}">
-                                  <strong>${escapeHtml(product.name)}</strong>
-                                </a>
-                              </p>
-                              <p>
-                                ${
-                                  product.price_on_request
-                                    ? "Цена по запросу"
-                                    : discountPercent > 0
-                                      ? `<s>${product.price} ${escapeHtml(product.currency || "BYN")}</s> → ${discountedPrice} ${escapeHtml(product.currency || "BYN")}`
-                                      : `${product.price} ${escapeHtml(product.currency || "BYN")}`
-                                }
-                              </p>
-                            </li>
-                          `;
-                        }).join("")}
+                      <ul class="product-cards">
+                        ${recommendedProducts.map(product => renderProductCard(product, {
+                          favoriteIds: homeFavoriteIds,
+                          brandName: product.brand_name || "",
+                          characteristics: homeCardCharacteristics.get(product.id) || []
+                        })).join("")}
                       </ul>
                     `
                     : ""
                 }
+
+                <section id="contacts">
+                  <h2>Контакты</h2>
+                  ${contacts.contact_phone ? `<p>Телефон: <a href="tel:${escapeHtml(contacts.contact_phone)}">${escapeHtml(contacts.contact_phone)}</a></p>` : ""}
+                  ${contacts.contact_email ? `<p>Email: <a href="mailto:${escapeHtml(contacts.contact_email)}">${escapeHtml(contacts.contact_email)}</a></p>` : ""}
+                  ${contacts.contact_address ? `<p>Адрес: ${escapeHtml(contacts.contact_address)}</p>` : ""}
+                  ${contacts.contact_working_hours ? `<p>Время работы: ${escapeHtml(contacts.contact_working_hours)}</p>` : ""}
+                </section>
               `
             )
           );
@@ -3134,7 +3526,7 @@ if (
           path === "/services"
         ) {
           const services = db.prepare(`
-            SELECT id, name, short_description, image, video, price, price_on_request, unit
+            SELECT id, name, short_description, image, video, price, price_on_request, unit, region, service_type, min_rental_hours
             FROM services
             WHERE is_visible = 1
               AND deleted = 0
@@ -3177,6 +3569,9 @@ if (
                           `).join("")}
                           ${service.video ? `<p><video src="${escapeHtml(service.video)}" controls preload="metadata" style="max-width:100%;"></video></p>` : ""}
                           <p><strong>${service.price_on_request ? "Цена по запросу" : `${escapeHtml(service.price)} ${escapeHtml(service.unit || "шт.")}`}</strong></p>
+                          <p>Тип: ${service.service_type === "Rental" ? "Аренда (Rental)" : "Услуга (Service)"}</p>
+                          ${service.region ? `<p>Регион: ${escapeHtml(service.region)}</p>` : ""}
+                          ${service.service_type === "Rental" ? `<p>Минимальная аренда: ${escapeHtml(service.min_rental_hours ?? 2)} ч</p>` : ""}
                           ${(() => {
                             const tariffs = db.prepare("SELECT name, price, unit FROM service_tariffs WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
                             return tariffs.length
@@ -3190,6 +3585,9 @@ if (
                               ? `<ul>${characteristics.map(item => `<li><strong>${escapeHtml(item.name)}:</strong> ${escapeHtml(item.value)}</li>`).join("")}</ul>`
                               : "";
                           })()}
+                          <p>
+                            <a href="/service-request?service_id=${service.id}">Оставить заявку</a>
+                          </p>
                         </li>
                       `).join("")}
                     </ul>
@@ -3200,17 +3598,79 @@ if (
           );
         }
 
+        // ==================================================
+        // СТАТИЧЕСКАЯ СТРАНИЦА — ПУБЛИЧНЫЙ ВЫВОД
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          /^\/page\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(path)
+        ) {
+          const slug = path.split("/")[2];
+
+          const page = db.prepare(`
+            SELECT title, content
+            FROM pages
+            WHERE slug = ?
+              AND is_visible = 1
+            LIMIT 1
+          `).get(slug);
+
+          if (!page) {
+            return sendHtml(
+              res,
+              renderPage(req, "Страница не найдена", `<h1>Страница не найдена.</h1>`),
+              404
+            );
+          }
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              page.title,
+              `
+                <h1>${escapeHtml(page.title)}</h1>
+                <div>${escapeHtml(page.content).replace(/\n/g, "<br>")}</div>
+              `
+            )
+          );
+        }
+
         if (
           req.method === "GET" &&
           path === "/news"
         ) {
           const news = db.prepare(`
-            SELECT title, short_text, image
+            SELECT id, title, short_text, image
             FROM news
             WHERE is_visible = 1
               AND deleted = 0
             ORDER BY sort_order, id
           `).all();
+
+          const newsImagesStmt = db.prepare(`
+            SELECT image
+            FROM news_images
+            WHERE news_id = ?
+            ORDER BY sort_order, id
+          `);
+
+          function newsImageList(item) {
+            const images = [];
+            const seen = new Set();
+            if (item.image) {
+              images.push(item.image);
+              seen.add(item.image);
+            }
+            for (const row of newsImagesStmt.all(item.id)) {
+              if (!seen.has(row.image)) {
+                images.push(row.image);
+                seen.add(row.image);
+              }
+            }
+            return images;
+          }
 
           return sendHtml(
             res,
@@ -3225,17 +3685,15 @@ if (
                       ${news.map(item => `
                         <li>
                           <h2>${escapeHtml(item.title)}</h2>
-                          ${item.image
-                            ? `
-                              <p>
-                                <img
-                                  src="${escapeHtml(item.image)}"
-                                  alt="${escapeHtml(item.title)}"
-                                  style="max-width:200px; max-height:200px;"
-                                >
-                              </p>
-                            `
-                            : ""}
+                          ${newsImageList(item).map((img, idx) => `
+                            <p>
+                              <img
+                                src="${escapeHtml(img)}"
+                                alt="${escapeHtml(item.title)}${idx === 0 ? "" : " — фото " + (idx + 1)}"
+                                style="max-width:200px; max-height:200px;"
+                              >
+                            </p>
+                          `).join("")}
                           <p>${escapeHtml(item.short_text || "")}</p>
                         </li>
                       `).join("")}
@@ -4330,6 +4788,13 @@ if (
       ORDER BY id DESC
     `).all(brand.id);
 
+  const brandCardCharacteristics =
+    getProductCardCharacteristics(
+      products.map(product => product.id)
+    );
+
+  const brandFavoriteIds = getFavorites(req);
+
   return sendHtml(
     res,
     renderPage(
@@ -4350,14 +4815,12 @@ if (
           products.length === 0
             ? "<p>Товаров этого бренда пока нет.</p>"
             : `
-              <ul>
-                ${products.map(product => `
-                  <li>
-                    <a href="/product/${product.id}">
-                      ${escapeHtml(product.name)}
-                    </a>
-                  </li>
-                `).join("")}
+              <ul class="product-cards">
+                ${products.map(product => renderProductCard(product, {
+                  favoriteIds: brandFavoriteIds,
+                  brandName: brand.name,
+                  characteristics: brandCardCharacteristics.get(product.id) || []
+                })).join("")}
               </ul>
             `
         }
@@ -4659,6 +5122,8 @@ if (selectedCharacteristicIds.length > 0) {
 
   let productsHtml = "";
 
+  const favoriteIds = getFavorites(req);
+
   if (products.length === 0) {
 
     productsHtml =
@@ -4666,148 +5131,28 @@ if (selectedCharacteristicIds.length > 0) {
 
   } else {
 
-    productsHtml = "<ul>";
+    const cardCharacteristics =
+      getProductCardCharacteristics(
+        products.map(product => product.id)
+      );
+
+    const brandNames =
+      getBrandNamesByIds(
+        products.map(product => product.brand_id)
+      );
+
+    productsHtml = `<ul class="product-cards">`;
 
     for (
       const product
       of products
     ) {
-
-      const discountPercent =
-        Number(product.discount_percent) || 0;
-
-      const discountedPrice =
-        discountPercent > 0
-          ? product.price * (1 - discountPercent / 100)
-          : product.price;
-
-      const names =
-        getProductCategoryNames(
-          product.id
-        );
-
-      productsHtml += `
-        <li>
-
-          <p>
-            <a href="/product/${product.id}">
-              <strong>
-                ${escapeHtml(product.name)}
-              </strong>
-            </a>
-          </p>
-
-          <p>
-  Бренд: ${
-    product.brand_id
-      ? db.prepare(`
-          SELECT name
-          FROM brands
-          WHERE id = ?
-        `).get(product.brand_id)?.name || "—"
-      : "—"
-  }
-</p>
-
-          <p>
-            ${
-              product.price_on_request
-                ? "Цена по запросу"
-                : discountPercent > 0
-                  ? `<s>${product.price} ${product.currency}</s>
-                     →
-                     ${discountedPrice} ${product.currency}`
-                  : `${product.price} ${product.currency}`
-            }
-          </p>
-
-          <p>
-            Наличие:
-            ${
-product.availability === "in_stock"
-                ? "В наличии"
-                : product.availability === "on_order"
-                  ? "Под заказ"
-                  : "Нет в наличии"
-            }
-          </p>
-
-          <p>
-  ${
-    Number(product.discount_percent) > 0
-      ? "Акция "
-      : ""
-  }
-  ${
-    product.is_new
-      ? "Новинка "
-      : ""
-  }
-  ${
-    product.is_hit
-      ? "Хит"
-      : ""
-  }
-</p>
-
-          ${
-            names.length
-              ? `
-                <p>
-                  Категории:
-                  ${escapeHtml(names.join(", "))}
-                </p>
-              `
-              : ""
-          }
-
-          <p>
-            ${escapeHtml(product.description || "")}
-          </p>
-
-          ${
-            product.image
-              ? `
-                <p>
-                  <img
-                    src="${escapeHtml(product.image)}"
-                    alt="${escapeHtml(product.name)}"
-                    style="max-width:200px; max-height:200px;"
-                  >
-                </p>
-              `
-              : ""
-          }
-
-          <p>
-            <a href="/cart/add/${product.id}">
-              В корзину
-            </a>
-
-            ${
-              isAdmin(req)
-                ? `
-                  |
-                  <a href="/edit-product/${product.id}">
-                    Редактировать
-                  </a>
-
-                  |
-                  <a
-                    href="/delete-product/${product.id}"
-                    onclick="return confirm('Удалить товар?')"
-                  >
-                    Удалить
-                  </a>
-                `
-                : ""
-            }
-          </p>
-
-        </li>
-
-        <hr>
-      `;
+      productsHtml += renderProductCard(product, {
+        favoriteIds,
+        brandName: brandNames.get(product.brand_id) || "",
+        characteristics: cardCharacteristics.get(product.id) || [],
+        admin: isAdmin(req)
+      });
     }
 
     productsHtml += "</ul>";
@@ -5466,11 +5811,24 @@ if (
       SELECT
         p.id,
         p.name,
-        p.image
+        p.image,
+        p.price,
+        p.currency,
+        p.sku,
+        p.is_new,
+        p.is_hit,
+        p.availability,
+        p.discount_percent,
+        p.price_on_request,
+        p.brand_id,
+        b.name AS brand_name
       FROM product_recommendations pr
 
       JOIN products p
         ON p.id = pr.recommended_product_id
+
+      LEFT JOIN brands b
+        ON b.id = p.brand_id
 
       WHERE
         pr.product_id = ?
@@ -5517,43 +5875,29 @@ if (
   let recommendationHtml = "";
 
   if (recommendedProducts.length > 0) {
+    const recommendationCharacteristics =
+      getProductCardCharacteristics(
+        recommendedProducts.map(product => product.id)
+      );
+
+    const recommendationBrandNames =
+      getBrandNamesByIds(
+        recommendedProducts.map(product => product.brand_id)
+      );
+
+    const recommendationFavoriteIds = getFavorites(req);
+
     recommendationHtml += `
       <h2>
         Рекомендованные товары
       </h2>
 
-      <ul>
-    `;
-
-    for (const recommendedProduct of recommendedProducts) {
-      recommendationHtml += `
-        <li>
-          <p>
-            <a href="/product/${recommendedProduct.id}">
-              <strong>
-                ${escapeHtml(recommendedProduct.name)}
-              </strong>
-            </a>
-          </p>
-
-          ${
-            recommendedProduct.image
-              ? `
-                <p>
-                  <img
-                    src="${escapeHtml(recommendedProduct.image)}"
-                    alt="${escapeHtml(recommendedProduct.name)}"
-                    style="max-width:200px; max-height:200px;"
-                  >
-                </p>
-              `
-              : ""
-          }
-        </li>
-      `;
-    }
-
-    recommendationHtml += `
+      <ul class="product-cards">
+        ${recommendedProducts.map(recommendedProduct => renderProductCard(recommendedProduct, {
+          favoriteIds: recommendationFavoriteIds,
+          brandName: recommendationBrandNames.get(recommendedProduct.brand_id) || "",
+          characteristics: recommendationCharacteristics.get(recommendedProduct.id) || []
+        })).join("")}
       </ul>
     `;
   }
@@ -5656,6 +6000,11 @@ if (
           <a href="/cart/add/${id}">
             В корзину
           </a>
+
+          |
+          <a href="/favorites/toggle/${id}">
+            ${getFavorites(req).includes(id) ? "Убрать из избранного" : "В избранное"}
+          </a>
         </p>
 
         ${recommendationHtml}
@@ -5675,10 +6024,6 @@ if (
 
         <script>
           (() => {
-            if (!window.matchMedia("(max-width: 640px)").matches) {
-              return;
-            }
-
             const images = document.querySelectorAll(
               ".product-main-image, .product-gallery-image"
             );
@@ -5999,6 +6344,122 @@ return redirect(
           );
         }
 
+
+        // ==================================================
+        // ИЗБРАННОЕ — СТРАНИЦА
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/favorites"
+        ) {
+          const favoriteIds = getFavorites(req);
+
+          const favoriteProducts = favoriteIds
+            .map(id =>
+              db.prepare(`
+                SELECT
+                  p.id, p.name, p.image, p.price, p.currency,
+                  p.sku, p.is_new, p.is_hit, p.availability,
+                  p.discount_percent, p.price_on_request, p.brand_id,
+                  b.name AS brand_name
+                FROM products p
+                LEFT JOIN brands b ON b.id = p.brand_id
+                WHERE p.id = ? AND p.deleted = 0
+              `).get(id)
+            )
+            .filter(Boolean);
+
+          const favoriteCharacteristics =
+            getProductCardCharacteristics(
+              favoriteProducts.map(product => product.id)
+            );
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Избранное",
+              `
+                <h1>Избранное</h1>
+
+                ${
+                  favoriteProducts.length > 0
+                    ? `
+                      <ul class="product-cards">
+                        ${favoriteProducts.map(product => renderProductCard(product, {
+                          favoriteIds,
+                          brandName: product.brand_name || "",
+                          characteristics: favoriteCharacteristics.get(product.id) || []
+                        })).join("")}
+                      </ul>
+                    `
+                    : "<p>В избранном пока ничего нет.</p>"
+                }
+              `
+            )
+          );
+        }
+
+        // ==================================================
+        // ИЗБРАННОЕ — ПЕРЕКЛЮЧИТЬ
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path.startsWith("/favorites/toggle/")
+        ) {
+          const id =
+            Number(
+              path.split("/")[3]
+            );
+
+          const product =
+            db.prepare(`
+              SELECT id
+              FROM products
+              WHERE id = ? AND deleted = 0
+            `).get(id);
+
+          if (!product) {
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Товар не найден",
+                `
+                  <h1>Товар не найден</h1>
+                `
+              ),
+              404
+            );
+          }
+
+          const favorites = getFavorites(req);
+          const index = favorites.indexOf(id);
+
+          if (index === -1) {
+            favorites.push(id);
+          } else {
+            favorites.splice(index, 1);
+          }
+
+          setFavorites(res, favorites);
+
+          const referer = req.headers.referer || "";
+          const refererUrl = new URL(
+            referer,
+            `http://${req.headers.host || "localhost"}`
+          );
+
+          const backUrl =
+            referer &&
+            refererUrl.host === (req.headers.host || "localhost")
+              ? refererUrl.pathname + refererUrl.search
+              : "/catalog";
+
+          return redirect(res, backUrl);
+        }
 
         // ==================================================
         // КОРЗИНА
@@ -6868,12 +7329,33 @@ return redirect(
            path === "/service-request"
          ) {
 
+           const serviceId =
+             Number(url.searchParams.get("service_id")) || 0;
+
+           const selectedService =
+             serviceId > 0
+               ? db.prepare(
+                   "SELECT * FROM services WHERE id = ? AND is_visible = 1 AND deleted = 0"
+                 ).get(serviceId) || null
+               : null;
+
+           const prefilledValues =
+             selectedService
+               ? {
+                   type:
+                     selectedService.service_type === "Rental"
+                       ? "Аренда техники"
+                       : "Услуга",
+                   service_name: selectedService.name
+                 }
+               : {};
+
            return sendHtml(
              res,
              renderPage(
                req,
                "Заявка на услугу / аренду",
-               renderServiceRequestForm()
+               renderServiceRequestForm(prefilledValues)
              )
            );
          }
@@ -8248,6 +8730,13 @@ if (isValidPhone(phone)) {
                     ${filterType === "Аренда техники" ? "selected" : ""}
                   >
                     Аренда техники
+                  </option>
+
+                  <option
+                    value="Ремонт"
+                    ${filterType === "Ремонт" ? "selected" : ""}
+                  >
+                    Ремонт
                   </option>
                 </select>
 
@@ -11737,6 +12226,35 @@ if (
                     <input type="text" name="unit" value="шт." maxlength="32">
                   </p>
 
+                  <p>
+                    Регион:
+                    <input type="text" name="region" value="" maxlength="100">
+                  </p>
+
+                  <p>
+                    Тип услуги:
+                    <select name="service_type">
+                      <option value="Service" selected>Услуга (Service)</option>
+                      <option value="Rental">Аренда (Rental)</option>
+                    </select>
+                  </p>
+                  <p class="min-rental-hours-field" hidden>
+                    Минимум часов аренды:
+                    <input type="number" name="min_rental_hours" min="1" step="1" value="2">
+                  </p>
+                  <script>
+                    (() => {
+                      const form = document.currentScript.closest("form");
+                      const typeSelect = form.querySelector('[name="service_type"]');
+                      const hoursField = form.querySelector(".min-rental-hours-field");
+                      const updateVisibility = () => {
+                        hoursField.hidden = typeSelect.value !== "Rental";
+                      };
+                      typeSelect.addEventListener("change", updateVisibility);
+                      updateVisibility();
+                    })();
+                  </script>
+
                   <fieldset class="service-tariffs-editor">
                     <legend>Тарифы</legend>
                     <div class="service-tariff-rows"></div>
@@ -11860,6 +12378,8 @@ if (
           const priceValue = params.get("price")?.trim() || "";
           const price = priceOnRequest ? 0 : Number(priceValue);
           const unit = params.get("unit")?.trim() || "шт.";
+          const region = params.get("region")?.trim() || "";
+          const { serviceType, minRentalHours } = getServiceTypeFields(params);
           const tariffResult = getServiceTariffs(params);
           const imageFile = params.getFile("image");
           const videoFile = params.getFile("video");
@@ -11898,9 +12418,9 @@ if (
 
           const result = db.prepare(`
             INSERT INTO services
-            (name, short_description, description, image, sort_order, is_visible, video, price, price_on_request, unit)
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-          `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit);
+            (name, short_description, description, image, sort_order, is_visible, video, price, price_on_request, unit, region, service_type, min_rental_hours)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+          `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, region, serviceType, minRentalHours);
 
           replaceServiceTariffs(Number(result.lastInsertRowid), tariffResult.tariffs);
           saveServiceCharacteristics(Number(result.lastInsertRowid), params);
@@ -12001,6 +12521,35 @@ if (
                     Единица измерения:
                     <input type="text" name="unit" value="${escapeHtml(service.unit || "шт.")}" maxlength="32">
                   </p>
+
+                  <p>
+                    Регион:
+                    <input type="text" name="region" value="${escapeHtml(service.region || "")}" maxlength="100">
+                  </p>
+
+                  <p>
+                    Тип услуги:
+                    <select name="service_type">
+                      <option value="Service" ${service.service_type !== "Rental" ? "selected" : ""}>Услуга (Service)</option>
+                      <option value="Rental" ${service.service_type === "Rental" ? "selected" : ""}>Аренда (Rental)</option>
+                    </select>
+                  </p>
+                  <p class="min-rental-hours-field" hidden>
+                    Минимум часов аренды:
+                    <input type="number" name="min_rental_hours" min="1" step="1" value="${escapeHtml(service.min_rental_hours ?? 2)}">
+                  </p>
+                  <script>
+                    (() => {
+                      const form = document.currentScript.closest("form");
+                      const typeSelect = form.querySelector('[name="service_type"]');
+                      const hoursField = form.querySelector(".min-rental-hours-field");
+                      const updateVisibility = () => {
+                        hoursField.hidden = typeSelect.value !== "Rental";
+                      };
+                      typeSelect.addEventListener("change", updateVisibility);
+                      updateVisibility();
+                    })();
+                  </script>
 
                   <fieldset class="service-tariffs-editor">
                     <legend>Тарифы</legend>
@@ -12123,6 +12672,8 @@ if (
           const priceValue = params.get("price")?.trim() || "";
           const price = priceOnRequest ? 0 : Number(priceValue);
           const unit = params.get("unit")?.trim() || "шт.";
+          const region = params.get("region")?.trim() || "";
+          const { serviceType, minRentalHours } = getServiceTypeFields(params);
           const tariffResult = getServiceTariffs(params);
           const imageFile = params.getFile("image");
           const videoFile = params.getFile("video");
@@ -12165,9 +12716,9 @@ if (
 
           db.prepare(`
             UPDATE services
-            SET name = ?, short_description = ?, description = ?, image = ?, sort_order = ?, video = ?, price = ?, price_on_request = ?, unit = ?
+            SET name = ?, short_description = ?, description = ?, image = ?, sort_order = ?, video = ?, price = ?, price_on_request = ?, unit = ?, region = ?, service_type = ?, min_rental_hours = ?
             WHERE id = ?
-          `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, id);
+          `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, region, serviceType, minRentalHours, id);
 
           replaceServiceTariffs(id, tariffResult.tariffs);
           saveServiceCharacteristics(id, params, true);
@@ -13250,7 +13801,7 @@ if (
                   ${pages.map(page => `
                     <li>
                       <strong>${escapeHtml(page.name)}</strong>
-                      — /${escapeHtml(page.slug)}
+                      — <a href="/page/${escapeHtml(page.slug)}">/page/${escapeHtml(page.slug)}</a>
                       — ${page.is_visible ? "показывается" : "скрыта"}
                       — порядок: ${page.sort_order}
                       <a href="/admin/pages/edit/${page.id}">Редактировать</a>
