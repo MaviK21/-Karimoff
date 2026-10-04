@@ -3,3 +3,8 @@ node_modules/
 *.db-shm
 *.db-wal
 server.log
+
+# Runtime-база данных и резервные копии — не должны попадать в Git
+karimoff.db
+karimoff.db-journal
+backups/
