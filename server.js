@@ -1,19 +1,26 @@
 import dotenv from "dotenv";
-dotenv.config({ path: ".env" });
-
 import { createServer } from "http";
-import { randomBytes } from "crypto";
+import { randomBytes, createHash, timingSafeEqual } from "crypto";
 import nodemailer from "nodemailer";
 import Busboy from "busboy";
 import sharp from "sharp";
 import db from "./lib/db.js";
 
 import pathModule from "path";
+const SIG_MESSAGE =
+  "Содержимое файла не соответствует заявленному формату.";
+
 import { fileURLToPath } from "url";
 import fs from "fs/promises";
 import { mkdirSync, writeFileSync } from "fs";
 
-const PORT = 3000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = pathModule.dirname(__filename);
+
+// .env всегда ищется в корне проекта, независимо от рабочего каталога процесса.
+dotenv.config({ path: pathModule.join(__dirname, ".env") });
+
+const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 if (!ADMIN_PASSWORD) {
@@ -33,10 +40,51 @@ const mailTransporter =
     }
   });
 
+// CSRF double-submit: случайный токен в cookie + тот же токен в скрытом
+// поле формы или заголовке X-CSRF-Token. Cookie без HttpOnly намеренно —
+// AJAX-скрипт читает токен из meta-тега.
+let currentCsrfToken = "";
+
+function renderCsrfField() {
+  return `<input type="hidden" name="_csrf" value="${currentCsrfToken}">`;
+}
+
+function isCsrfValid(req, provided) {
+  const cookieToken = parseCookies(req).csrf_token;
+  return (
+    typeof cookieToken === "string" &&
+    cookieToken.length === 64 &&
+    typeof provided === "string" &&
+    provided.length === 64 &&
+    cookieToken === provided
+  );
+}
+
+function getCsrfFromRequest(req, params) {
+  const headerToken = req.headers["x-csrf-token"];
+  if (typeof headerToken === "string" && headerToken) {
+    return headerToken;
+  }
+  return params ? params.get("_csrf") : null;
+}
+
+function sendCsrfForbidden(res, req) {
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      "Доступ запрещён",
+      `
+        <h1>403 — Запрос отклонён</h1>
+        <p>Проверка безопасности не пройдена. Обновите страницу и попробуйте снова.</p>
+      `
+    ),
+    403
+  );
+}
+
 let adminToken = null;
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = pathModule.dirname(__filename);
 
 const UPLOADS_DIR =
   pathModule.join(
@@ -79,13 +127,91 @@ function parseCookies(req) {
       continue;
     }
 
-    cookies[name] = decodeURIComponent(
-      pieces.join("=") || ""
-    );
+    // Изолированный декод: повреждённый percent-encoding одной cookie
+    // не должен крашить обработку запроса (значение остаётся сырым).
+    const rawValue = pieces.join("=") || "";
+
+    try {
+      cookies[name] = decodeURIComponent(rawValue);
+    } catch {
+      cookies[name] = rawValue;
+    }
   }
 
   return cookies;
 }
+
+const TOPBAR_PLACEHOLDER = {
+  address: "г. Лепель, ул. Максима Горького, 55",
+  hours: "Пн–Пт 9:00–18:00, Сб 9:00-14:00",
+  phone: "+375 (29) 000-00-00"
+};
+
+const HERO_PLACEHOLDER = {
+  title: "Техника, товары и услуги — всё в одном месте",
+  description: "Каталог из 300+ товаров, аренда спецтехники, ремонт — для частных лиц и организаций Лепельского и Витебского районов.",
+  buttonText: "Перейти в каталог",
+  buttonUrl: "/catalog",
+  image: "/uploads/hero-fallback.jpg"
+};
+
+// PLACEHOLDER: цифры статистики с эталона — заменить реальными показателями.
+const HOME_STATS_PLACEHOLDER = [
+  { value: "300+", label: "Товаров в каталоге" },
+  { value: "500+", label: "Довольных клиентов" },
+  { value: "6", label: "Видов услуг" },
+  { value: "10+", label: "Лет на рынке" }
+];
+
+// Тематические верхние полосы внутренних страниц: pathname -> изображение.
+// image: null -> navy-градиент. Для подключения фото указать "/uploads/<файл>".
+const PAGE_TOP_THEMES = [
+  {
+    match: /^\/catalog/,
+    image: "/uploads/catalog-hero.jpg",
+    description: "Строительная техника и оборудование — широкий ассортимент для любых задач",
+    noOverlay: true,
+    tall: true
+  },
+  {
+    match: /^\/product\//,
+    image: null
+  },
+  {
+    match: /^\/services/,
+    image: "/uploads/services-hero.jpg",
+    description: "Аренда строительной техники и профессиональные услуги для объектов любой сложности",
+    tall: true
+  },
+  { match: /^\/service-request/, image: null },
+  {
+    match: /^\/projects/,
+    image: "/uploads/projects-hero.jpg",
+    description: "Реализованные проекты и выполненные работы Karimoff",
+    tall: true
+  },
+  {
+    match: /^\/news/,
+    image: "/uploads/news-hero.jpg",
+    description: "Новости, события и актуальная информация Karimoff",
+    tall: true
+  },
+  { match: /^\/about/, image: null },
+  {
+    match: /^\/contacts/,
+    image: "/uploads/contacts-hero.jpg",
+    description: "Свяжитесь с Karimoff по телефону или электронной почте",
+    tall: true
+  },
+  {
+    match: /^\/cart/,
+    image: "/uploads/cart-hero.jpg"
+  },
+  { match: /^\/favorites/, image: null },
+  { match: /^\/repair-request/, image: null },
+  { match: /^\/checkout/, image: null },
+  { match: /^\/page\//, image: null }
+];
 
 function normalizeSearchText(value = "") {
   return String(value)
@@ -165,11 +291,13 @@ function requireAdmin(req, res) {
 function sendHtml(
   res,
   body,
-  statusCode = 200
+  statusCode = 200,
+  extraHeaders = {}
 ) {
   res.writeHead(statusCode, {
     "Content-Type":
-      "text/html; charset=utf-8"
+      "text/html; charset=utf-8",
+    ...extraHeaders
   });
 
   res.end(body);
@@ -203,6 +331,7 @@ function isValidPhone(phone) {
 
 const contactSettingKeys = [
   "contact_phone",
+  "contact_phone_2",
   "contact_email",
   "contact_address",
   "contact_working_hours",
@@ -234,6 +363,13 @@ function validateContactSettings(values) {
 
   if (values.contact_phone && !isValidPhone(values.contact_phone)) {
     errors.contact_phone = "Укажите корректный номер телефона.";
+  }
+
+  if (
+    values.contact_phone_2 &&
+    !isValidPhone(values.contact_phone_2)
+  ) {
+    errors.contact_phone_2 = "Укажите корректный номер телефона.";
   }
 
   if (
@@ -280,13 +416,51 @@ function saveContactSettings(values) {
 function renderPage(
   req,
   title,
-  content
+  content,
+  options = {}
 ) {
   const pathname = new URL(
     req.url,
     `http://${req.headers.host || "localhost"}`
   ).pathname;
   let breadcrumbs = "";
+
+  // Тематическая верхняя полоса внутренних страниц: navy overlay + заголовок.
+  // Изображение берётся из PAGE_TOP_THEMES; null -> navy-градиент.
+  let pageHeroBand = "";
+  if (
+    req.method === "GET" &&
+    options.theme !== false &&
+    !pathname.startsWith("/admin")
+  ) {
+    const themeEntry = PAGE_TOP_THEMES.find(theme =>
+      theme.match.test(pathname)
+    );
+
+    if (themeEntry) {
+      const bandBg = themeEntry.image
+        ? themeEntry.noOverlay
+          ? `url('${escapeHtml(themeEntry.image)}')`
+          : `linear-gradient(rgba(31, 68, 104, 0.78), rgba(31, 68, 104, 0.78)), url('${escapeHtml(themeEntry.image)}')`
+        : null;
+
+      pageHeroBand = `
+        <section class="page-hero-band${themeEntry.image ? " page-hero-band--photo" : ""}${themeEntry.tall ? " page-hero-band--tall" : ""}"${bandBg ? ` style="background-image:${bandBg}"` : ""}>
+          <div class="page-hero-band-inner">
+            <h1 class="page-hero-band-title">${escapeHtml(title)}</h1>
+            ${themeEntry.description ? `<p class="page-hero-band-desc">${escapeHtml(themeEntry.description)}</p>` : ""}
+          </div>
+        </section>
+      `;
+    }
+  }
+
+  // При активной тематической полосе заголовок дублировать в контенте не нужно:
+  // убираем ведущий <h1> страницы.
+  let contentHtml = content;
+  if (pageHeroBand) {
+    contentHtml = String(contentHtml).replace(/^(\s*)<h1>[\s\S]*?<\/h1>\s*/, "$1");
+  }
 
   if (
     req.method === "GET" &&
@@ -432,6 +606,7 @@ function renderPage(
           <h2>Компания</h2>
           <ul>
             <li><a href="/about">О компании</a></li>
+            <li><a href="/contacts">Контакты</a></li>
             <li><a href="/brands">Бренды</a></li>
             <li><a href="/news">Новости</a></li>
             <li><a href="/projects">Проекты</a></li>
@@ -447,7 +622,7 @@ function renderPage(
             ? `<p>${footerMessengerLinks.map(messenger => `<a href="${escapeHtml(footerContacts[messenger.key])}" target="_blank" rel="noopener">${messenger.label}</a>`).join(" | ")}</p>`
             : ""}
         </section>
-        <p>© ${new Date().getFullYear()} Karimoff</p>
+        <p class="footer-copy">© ${new Date().getFullYear()} Karimoff</p>
       </footer>
     `
     : "";
@@ -540,9 +715,8 @@ function renderPage(
       ? (() => {
           const contacts = getContactSettings();
 
-          // ДЕМО-Шаблон панели контактов: показываются все 4 канала из ТЗ.
-          // Демонстрационные значения подставляются только пока соответствующая
-          // настройка в /admin/contacts не заполнена; в БД они не записываются.
+          // Панель показывает только реальные каналы: телефон из contact_phone,
+          // мессенджеры — только если соответствующая настройка заполнена в /admin/contacts.
           const iconPhone =
             `<circle cx="12" cy="12" r="11" fill="#245b82"/><path fill="#fff" transform="translate(4.55 4.55) scale(0.62)" d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.21c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>`;
           const iconTelegram =
@@ -555,28 +729,39 @@ function renderPage(
           const renderIcon = inner =>
             `<svg class="floating-contacts-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">${inner}</svg>`;
 
-          const channels = [
-            {
+          const channels = [];
+
+          if (contacts.contact_phone) {
+            channels.push({
               icon: iconPhone,
-              label: `Телефон: ${contacts.contact_phone || "+375 (29) 000-00-00"}`,
-              href: `tel:${contacts.contact_phone || "+375290000000"}`
-            },
-            {
+              label: `Телефон: ${contacts.contact_phone}`,
+              href: `tel:${String(contacts.contact_phone).replace(/[^+0-9]/g, "")}`
+            });
+          }
+
+          if (contacts.contact_telegram) {
+            channels.push({
               icon: iconTelegram,
-              label: `Telegram: ${contacts.contact_telegram || "@karimoff_demo"}`,
-              href: contacts.contact_telegram || "https://t.me/karimoff_demo"
-            },
-            {
+              label: `Telegram: ${contacts.contact_telegram}`,
+              href: contacts.contact_telegram
+            });
+          }
+
+          if (contacts.contact_whatsapp) {
+            channels.push({
               icon: iconWhatsApp,
-              label: `WhatsApp: ${contacts.contact_whatsapp || "+375 (29) 000-00-00"}`,
-              href: contacts.contact_whatsapp || "https://wa.me/375290000000"
-            },
-            {
+              label: `WhatsApp: ${contacts.contact_whatsapp}`,
+              href: contacts.contact_whatsapp
+            });
+          }
+
+          if (contacts.contact_viber) {
+            channels.push({
               icon: iconViber,
-              label: `Viber: ${contacts.contact_viber || "+375 (29) 000-00-00"}`,
-              href: contacts.contact_viber || "viber://chat?number=%2B375290000000"
-            }
-          ];
+              label: `Viber: ${contacts.contact_viber}`,
+              href: contacts.contact_viber
+            });
+          }
 
           const contactLinks =
             channels.map(channel => `
@@ -640,7 +825,7 @@ function renderPage(
   return `
 <!DOCTYPE html>
 <html lang="ru">
-<head>
+  <head>
   <meta charset="UTF-8">
 
   <meta
@@ -650,19 +835,119 @@ function renderPage(
 
   <title>${escapeHtml(title)}</title>
 
+  <link rel="icon" type="image/svg+xml" href="/public/img/favicon.svg">
+  <meta name="csrf-token" content="${currentCsrfToken}">
+
 ${publicPage ? '<link rel="stylesheet" href="/public/css/style.css">' : ""}
 ${adminPath || adminPanelPage ? '<link rel="stylesheet" href="/public/css/admin.css">' : ""}
 </head>
 
-<body class="${adminLoginPage ? "admin-login-page " : ""}${adminPanelPage ? "admin-panel-page " : ""}${publicPage ? "public-page " : ""}${pathname === "/" ? "home-page" : pathname === "/catalog" ? "catalog-page" : pathname === "/services" ? "services-page" : pathname === "/news" ? "news-page" : pathname === "/projects" ? "projects-page" : /^\/product\/\d+$/.test(pathname) ? "product-page" : ""}">
+<body class="${adminLoginPage ? "admin-login-page " : ""}${adminPanelPage ? "admin-panel-page " : ""}${publicPage ? "public-page " : ""}${pathname === "/" ? "home-page" : pathname === "/catalog" ? "catalog-page" : pathname === "/services" ? "services-page" : pathname === "/news" ? "news-page" : pathname === "/projects" ? "projects-page" : pathname === "/favorites" ? "favorites-page" : /^\/product\/\d+$/.test(pathname) ? "product-page" : ""}">
 
-${adminLoginPage || (adminPath && !adminPanelPage) ? "" : renderMenu(req, adminPanelPage)}
+${adminLoginPage || (adminPath && !adminPanelPage) ? "" : `<div class="site-frame site-frame--head">${renderMenu(req, adminPanelPage)}</div>`}
 
-${breadcrumbs}
+${publicPage ? `<div class="site-frame site-frame--content">${pageHeroBand}${breadcrumbs}${contentHtml}</div>` : `${pageHeroBand}${breadcrumbs}${contentHtml}`}
 
-${content}
+${publicPage ? `<div class="site-frame site-frame--footer">${publicFooter}</div>` : publicFooter}
 
-${publicFooter}
+${publicPage ? `
+<script>
+  (() => {
+    // AJAX-обновление корзины и избранного без перезагрузки страницы.
+    // Серверные маршруты работают и без JS: обычные запросы получают redirect.
+    const updateBadge = (selector, count) => {
+      const badge = document.querySelector(selector);
+      if (!badge) return;
+      badge.textContent = count;
+      badge.hidden = count <= 0;
+    };
+
+    const setFavoriteButtons = (productId, isFavorite) => {
+      document
+        .querySelectorAll('[data-fav-toggle][data-product-id="' + productId + '"]')
+        .forEach(button => {
+          button.textContent = isFavorite ? "Убрать из избранного" : "В избранное";
+          button.setAttribute("aria-pressed", isFavorite ? "true" : "false");
+        });
+    };
+
+    document.addEventListener("click", event => {
+      const favButton = event.target.closest("[data-fav-toggle]");
+      const cartButton = event.target.closest("[data-cart-add]");
+      const removeButton = event.target.closest("[data-cart-remove]");
+      const decreaseButton = event.target.closest("[data-cart-decrease]");
+      const clearButton = event.target.closest("[data-cart-clear]");
+      const button = favButton || cartButton || removeButton || decreaseButton || clearButton;
+
+      if (!button) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (button.dataset.busy === "1") {
+        return;
+      }
+      button.dataset.busy = "1";
+
+      const originalText = button.textContent;
+
+      const csrfTokenFromMeta =
+        (document.querySelector('meta[name="csrf-token"]') || {}).content || "";
+
+      fetch(button.getAttribute("href"), {
+        method: "POST",
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+          "X-CSRF-Token": csrfTokenFromMeta
+        }
+      })
+        .then(response => {
+          if (!response.ok) {
+            throw new Error("HTTP " + response.status);
+          }
+          return response.json();
+        })
+        .then(data => {
+          if (!data || !data.ok) {
+            throw new Error("Некорректный ответ сервера");
+          }
+
+          if (favButton) {
+            const productId = button.dataset.productId;
+            const isFavorite = !!data.favorite;
+
+            setFavoriteButtons(productId, isFavorite);
+            updateBadge("[data-header-favs-badge]", data.count);
+
+            if (document.body.classList.contains("favorites-page") && !isFavorite) {
+              document
+                .querySelectorAll('[data-fav-card="' + productId + '"]')
+                .forEach(card => card.remove());
+            }
+          } else if (removeButton || decreaseButton || clearButton) {
+            // Мутация корзины выполнена на сервере — перезагружаем страницу,
+            // чтобы обновились список, количества, суммы и badge.
+            window.location.reload();
+          } else {
+            updateBadge("[data-header-cart-badge]", data.count);
+            // На странице корзины (+) после мутации тоже нужна перезагрузка:
+            // количество, суммы и badge пересчитываются сервером.
+            if (document.querySelector(".cart-items")) {
+              window.location.reload();
+            }
+          }
+        })
+        .catch(() => {
+          button.textContent = originalText;
+        })
+        .finally(() => {
+          delete button.dataset.busy;
+        });
+    });
+  })();
+</script>
+` : ""}
 
 ${cookieNotice}
 
@@ -735,47 +1020,293 @@ function renderMenu(req, adminPanelPage = false) {
   const favoritesCount = getFavorites(req).length;
   const headerContacts = getContactSettings();
 
-  return `
-    <nav class="public-site-nav">
-      <a href="/">Главная</a> |
-      <details class="catalog-mega-menu">
-        <summary>Каталог</summary>
-        <div class="mega-menu">
-          <p class="mega-menu-all">
-            <a href="/catalog">Весь каталог</a>
-          </p>
-          ${
-            megaMenuCategories.length > 0
-              ? megaMenuCategories.map(category => `
-                  <div class="mega-menu-column">
-                    <a class="mega-menu-title" href="/catalog?category=${category.id}">${escapeHtml(category.name)}</a>
-                    ${renderPublicCategories(category.id)}
-                  </div>
-                `).join("")
-              : "<p>Категорий пока нет.</p>"
-          }
+
+  const svgPin = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>`;
+  const svgClock = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm1-13h-2v6l5 3 1-1.7-4-2.3V7z"/></svg>`;
+  const svgPhone = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.21c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>`;
+  const svgSearch = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z"/></svg>`;
+  const svgHeart = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`;
+  const svgCart = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path fill="currentColor" d="M7 18c-1.1 0-1.99.9-1.99 2S5.9 22 7 22s2-.9 2-2-.9-2-2-2zM1 2v2h2l3.6 7.59-1.35 2.45c-.16.28-.25.61-.25.96 0 1.1.9 2 2 2h12v-2H7.42c-.14 0-.25-.11-.25-.25l.03-.12.9-1.63h7.45c.75 0 1.41-.41 1.75-1.03l3.58-6.49A1 1 0 0 0 20 4H5.21l-.94-2H1zm16 16c-1.1 0-1.99.9-1.99 2s.89 2 1.99 2 2-.9 2-2-.9-2-2-2z"/></svg>`;
+  const svgGrid = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/></svg>`;
+  const svgChevron = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M9 6l6 6-6 6-1.4-1.4L12.2 12 7.6 7.4z"/></svg>`;
+
+  // Top-bar: реальные значения из site_settings имеют приоритет,
+  // при отсутствии используется placeholder эталона (не записывается в БД).
+  const topBarAddress = headerContacts.contact_address || TOPBAR_PLACEHOLDER.address;
+  const topBarHours = headerContacts.contact_working_hours || TOPBAR_PLACEHOLDER.hours;
+  const topBarPhone = headerContacts.contact_phone || TOPBAR_PLACEHOLDER.phone;
+
+  const topBar = `
+    <div class="top-bar">
+      <div class="top-bar-inner">
+        <div class="top-bar-contacts">
+          <span class="top-bar-item">${svgPin}<span>${escapeHtml(topBarAddress)}</span></span>
+          <span class="top-bar-item">${svgClock}<span>${escapeHtml(topBarHours)}</span></span>
         </div>
-      </details> |
-      <form method="GET" action="/catalog" style="display:inline-block;position:relative;">
-        <input type="search" name="search" placeholder="Поиск товара" aria-label="Поиск товаров">
-        <button type="submit">Найти</button>
-        <div
-          id="search-suggestions"
-          style="display:none; position:absolute; top:100%; left:0; right:0; z-index:1000; background:white; border:1px solid #ccc; width:100%; box-sizing:border-box;"
-        ></div>
-      </form> |
-      ${headerContacts.contact_phone ? `<a href="tel:${escapeHtml(headerContacts.contact_phone)}">${escapeHtml(headerContacts.contact_phone)}</a> |` : ""}
-      <a href="/favorites">Избранное${favoritesCount > 0 ? ` (${favoritesCount})` : ""}</a> |
-      <a href="/cart">Корзина${cartCount > 0 ? ` (${cartCount})` : ""}</a> |
-      <a href="/services">Услуги</a> |
-      <a href="/news">Новости</a> |
-      <a href="/projects">Проекты</a>
+        <div class="top-bar-actions">
+          <a class="top-bar-phone" href="tel:${escapeHtml(topBarPhone)}">${svgPhone}<span>${escapeHtml(topBarPhone)}</span></a>
+          <a class="top-bar-callback" href="/callback-request">Перезвонить</a>
+        </div>
+      </div>
+    </div>`;
 
+  const siteHeader = `
+    <header class="site-header">
+      <div class="site-header-inner">
+        <a class="site-logo" href="/" aria-label="Karimoff — на главную">
+          <img class="site-logo-image" src="/public/img/logo.svg" alt="Karimoff" width="119" height="116">
+        </a>
+        <form class="site-search" method="GET" action="/catalog" role="search">
+          <input type="search" name="search" placeholder="Поиск товаров, артикулов, брендов..." aria-label="Поиск товаров">
+          <button type="submit" aria-label="Найти">${svgSearch}</button>
+          <div
+            id="search-suggestions"
+            style="display:none; position:absolute; top:100%; left:0; right:0; z-index:1200; background:white; border:1px solid #ccc; width:100%; box-sizing:border-box;"
+          ></div>
+        </form>
+        <div class="site-header-actions">
+          <a class="site-header-icon" href="/favorites" aria-label="Избранное">
+            ${svgHeart}
+            <span class="site-header-badge" data-header-favs-badge${favoritesCount > 0 ? "" : " hidden"}>${favoritesCount}</span>
+          </a>
+          <a class="site-header-icon" href="/cart" aria-label="Корзина">
+            ${svgCart}
+            <span class="site-header-badge" data-header-cart-badge${cartCount > 0 ? "" : " hidden"}>${cartCount}</span>
+          </a>
+        </div>
+      </div>
+    </header>`;
+
+  const siteNav = `
+    <nav class="site-nav" aria-label="Основная навигация">
+      <div class="site-nav-inner">
+        <details class="catalog-mega-menu">
+          <summary>${svgGrid}<span>Каталог</span>${svgChevron}</summary>
+          <div class="mega-menu">
+            <p class="mega-menu-all">
+              <a href="/catalog">Весь каталог</a>
+            </p>
+            ${
+              megaMenuCategories.length > 0
+                ? megaMenuCategories.map(category => `
+                    <div class="mega-menu-column">
+                      <a class="mega-menu-title" href="/catalog?category=${category.id}">${escapeHtml(category.name)}</a>
+                      ${renderPublicCategories(category.id)}
+                    </div>
+                  `).join("")
+                : "<p>Категорий пока нет.</p>"
+            }
+          </div>
+        </details>
+        <a href="/services">Услуги</a>
+        <a href="/projects">Проекты</a>
+        <a href="/news">Новости</a>
+        <a href="/about">О компании</a>
+        <a href="/contacts">Контакты</a>
+      </div>
     </nav>
-
-    <hr>
   `;
+
+  return topBar + siteHeader + siteNav;
 }
+
+
+// ======================================================
+// RATE LIMIT И HONEYPOT ДЛЯ ПУБЛИЧНЫХ ФОРМ
+// Application-level защита от ботов и email-flood.
+// Volumetric DDoS этим не закрывается — только CDN/WAF.
+// ======================================================
+
+const RATE_LIMIT_RULES = {
+  "/callback-request": { limit: 3, windowMs: 10 * 60 * 1000 },
+  "/repair-request": { limit: 3, windowMs: 10 * 60 * 1000 },
+  "/service-request": { limit: 3, windowMs: 10 * 60 * 1000 },
+  "/buy-one-click": { limit: 5, windowMs: 15 * 60 * 1000 },
+  "/checkout": { limit: 5, windowMs: 15 * 60 * 1000 },
+  "/search-suggestions": { limit: 30, windowMs: 60 * 1000 }
+};
+
+const RATE_LIMIT_MAX_KEYS = 20000;
+const rateLimitBuckets = new Map();
+
+function getClientIp(req) {
+  // TRUST_PROXY=1 включает доверие X-Forwarded-For (за reverse proxy/CDN).
+  // По умолчанию берётся адрес сокета, чтобы IP нельзя было подделать заголовком.
+  if (process.env.TRUST_PROXY === "1") {
+    const forwarded = req.headers["x-forwarded-for"];
+    if (typeof forwarded === "string" && forwarded.trim()) {
+      const first = forwarded.split(",")[0].trim();
+      if (first) {
+        return first.slice(0, 64);
+      }
+    }
+  }
+  return req.socket.remoteAddress || "unknown";
+}
+
+function enforceRateLimit(req, routeKey) {
+  const rule = RATE_LIMIT_RULES[routeKey];
+
+  if (!rule) {
+    return { allowed: true, retryAfter: 0 };
+  }
+
+  const now = Date.now();
+
+  // Очистка устаревших ключей, чтобы память не росла бесконечно.
+  if (rateLimitBuckets.size > RATE_LIMIT_MAX_KEYS) {
+    for (const [key, bucket] of rateLimitBuckets) {
+      if (bucket.resetAt <= now) {
+        rateLimitBuckets.delete(key);
+      }
+    }
+    if (rateLimitBuckets.size > RATE_LIMIT_MAX_KEYS) {
+      const oldest = [...rateLimitBuckets.entries()]
+        .sort((a, b) => a[1].resetAt - b[1].resetAt)
+        .slice(0, Math.floor(RATE_LIMIT_MAX_KEYS / 2));
+      for (const [key] of oldest) {
+        rateLimitBuckets.delete(key);
+      }
+    }
+  }
+
+  const key = routeKey + "|" + getClientIp(req);
+  let bucket = rateLimitBuckets.get(key);
+
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { count: 0, resetAt: now + rule.windowMs };
+    rateLimitBuckets.set(key, bucket);
+  }
+
+  bucket.count += 1;
+
+  if (bucket.count > rule.limit) {
+    const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    console.log("[security] rate limit exceeded: " + routeKey + " ip=" + getClientIp(req));
+    return { allowed: false, retryAfter };
+  }
+
+  return { allowed: true, retryAfter: 0 };
+}
+
+function isHoneypotFilled(params) {
+  return String(params.get("company_website") || "").trim() !== "";
+}
+
+// ======================================================
+// ЗАЩИТА АВТОРИЗАЦИИ АДМИНИСТРАТОРА
+// Timing-safe сравнение пароля + brute-force limit на IP.
+// ======================================================
+
+const ADMIN_LOGIN_MAX_FAILURES = 5;
+const ADMIN_LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const ADMIN_LOGIN_MAX_KEYS = 10000;
+const adminLoginFailures = new Map();
+
+// Timing-safe сравнение: SHA-256 выравнивает длины буферов,
+// timingSafeEqual исключает утечку по времени сравнения.
+function verifyAdminPassword(password) {
+  const provided = createHash("sha256").update(String(password ?? "")).digest();
+  const expected = createHash("sha256").update(String(ADMIN_PASSWORD ?? "")).digest();
+  return timingSafeEqual(provided, expected);
+}
+
+function getAdminLoginRecord(ip) {
+  const record = adminLoginFailures.get(ip);
+  const now = Date.now();
+
+  // Очистка устаревшей записи: окно истекло — попытки снова разрешены.
+  if (!record || record.windowStart + ADMIN_LOGIN_WINDOW_MS <= now) {
+    adminLoginFailures.delete(ip);
+    return { failures: 0, windowStart: now };
+  }
+
+  return record;
+}
+
+function isAdminLoginBlocked(ip) {
+  const record = getAdminLoginRecord(ip);
+  return record.failures >= ADMIN_LOGIN_MAX_FAILURES;
+}
+
+function getAdminLoginRetryAfter(ip) {
+  const record = getAdminLoginRecord(ip);
+  return Math.max(1, Math.ceil((record.windowStart + ADMIN_LOGIN_WINDOW_MS - Date.now()) / 1000));
+}
+
+function recordAdminLoginFailure(ip) {
+  // Контроль размера памяти: удаляем устаревшие ключи.
+  if (adminLoginFailures.size > ADMIN_LOGIN_MAX_KEYS) {
+    const now = Date.now();
+    for (const [key, record] of adminLoginFailures) {
+      if (record.windowStart + ADMIN_LOGIN_WINDOW_MS <= now) {
+        adminLoginFailures.delete(key);
+      }
+    }
+    if (adminLoginFailures.size > ADMIN_LOGIN_MAX_KEYS) {
+      const oldest = [...adminLoginFailures.entries()]
+        .sort((a, b) => a[1].windowStart - b[1].windowStart)
+        .slice(0, Math.floor(ADMIN_LOGIN_MAX_KEYS / 2));
+      for (const [key] of oldest) {
+        adminLoginFailures.delete(key);
+      }
+    }
+  }
+
+  const record = getAdminLoginRecord(ip);
+  record.failures += 1;
+  adminLoginFailures.set(ip, record);
+  console.log("[security] admin login failed: ip=" + ip + " attempt=" + record.failures);
+}
+
+function clearAdminLoginFailures(ip) {
+  adminLoginFailures.delete(ip);
+}
+
+function sendRateLimitedPage(res, req, retryAfter) {
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      "Слишком много запросов",
+      `
+        <h1>Слишком много запросов</h1>
+        <p>Пожалуйста, подождите немного и попробуйте снова.</p>
+      `
+    ),
+    429,
+    { "Retry-After": String(retryAfter) }
+  );
+}
+
+// Тихий ответ для сработавшего honeypot: правдоподобная «успешная»
+// страница без записи в БД и без отправки email.
+function sendHoneypotDecoy(res, req, routeKey) {
+  console.log("[security] honeypot triggered: " + routeKey + " ip=" + getClientIp(req));
+  const decoy = {
+    "/callback-request": ["Заявка принята", "Спасибо! Мы свяжемся с вами в ближайшее время."],
+    "/repair-request": ["Заявка на ремонт принята", "Спасибо! Мы свяжемся с вами в ближайшее время."],
+    "/service-request": ["Заявка на услугу принята", "Спасибо! Мы свяжемся с вами в ближайшее время."],
+    "/buy-one-click": ["Быстрый заказ принят", "Спасибо! Мы свяжемся с вами для подтверждения заказа."],
+    "/checkout": ["Заказ принят", "Спасибо! Мы свяжемся с вами для подтверждения заказа."]
+  };
+  const [title, message] = decoy[routeKey] || ["Отправлено", "Спасибо!"];
+  return sendHtml(
+    res,
+    renderPage(
+      req,
+      title,
+      `
+        <h1>${title}</h1>
+        <p>${message}</p>
+      `
+    )
+  );
+}
+
+// Скрытое поле honeypot для вставки в публичные формы.
+const HONEYPOT_FIELD =
+  `<input type="text" name="company_website" value="" class="honeypot-field" tabindex="-1" autocomplete="off" aria-hidden="true">`;
 
 
 function readBody(req) {
@@ -816,8 +1347,38 @@ function readRawBody(req) {
   });
 }
 
-function parseMultipartBody(req, contentType) {
+// ======================================================
+// ОБЩИЕ ЛИМИТЫ MULTIPART-ТЕЛА (запас ~10% над лимитами файлов)
+// publicPhotos: до 10 фото × 10 МБ (публичные repair/service)
+// adminProducts: изображения + несколько видео 50 МБ + документы
+// adminMedia: services — фото 10 МБ + видео 50 МБ
+// adminGallery: projects/news — главное фото + галерея
+// adminBanner: один файл баннера
+// ======================================================
+const MULTIPART_LIMITS = {
+  publicPhotos: 110 * 1024 * 1024,
+  adminProducts: 300 * 1024 * 1024,
+  adminMedia: 70 * 1024 * 1024,
+  adminGallery: 110 * 1024 * 1024,
+  adminBanner: 15 * 1024 * 1024
+};
+
+const MULTIPART_TOO_LARGE_MESSAGE =
+  "Загружаемые данные слишком большие.";
+
+
+function parseMultipartBody(req, contentType, maxBytes = MULTIPART_LIMITS.publicPhotos) {
   return new Promise((resolve, reject) => {
+    // Content-Length проверяем до чтения потока: слишком большой запрос
+    // вообще не должен попадать в память.
+    const contentLength = Number(req.headers["content-length"]);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      const tooLargeError = new Error(MULTIPART_TOO_LARGE_MESSAGE);
+      tooLargeError.statusCode = 413;
+      reject(tooLargeError);
+      return;
+    }
+
     let parser;
 
     try {
@@ -835,7 +1396,44 @@ function parseMultipartBody(req, contentType) {
     const files = new Map();
     const filePromises = [];
 
+    // Счётчик байтов всего тела: работает и для chunked-запросов,
+    // у которых нет Content-Length. Подвешивается до req.pipe(parser).
+    let receivedBytes = 0;
+    let limitExceeded = false;
+    const activeChunkLists = [];
+
+    const abortOnLimit = () => {
+      if (limitExceeded) {
+        return;
+      }
+      limitExceeded = true;
+      // Сбрасываем уже накопленные буферы файлов — данные не сохранятся.
+      for (const chunkList of activeChunkLists) {
+        chunkList.length = 0;
+      }
+      req.unpipe(parser);
+      if (typeof parser.destroy === "function") {
+        parser.destroy();
+      }
+      // Остаток тела сливаем без накопления в память.
+      req.resume();
+      const tooLargeError = new Error(MULTIPART_TOO_LARGE_MESSAGE);
+      tooLargeError.statusCode = 413;
+      reject(tooLargeError);
+    };
+
+    req.on("data", chunk => {
+      receivedBytes += chunk.length;
+
+      if (receivedBytes > maxBytes) {
+        abortOnLimit();
+      }
+    });
+
     parser.on("field", (name, value) => {
+      if (limitExceeded) {
+        return;
+      }
       if (!fields.has(name)) {
         fields.set(name, []);
       }
@@ -845,9 +1443,13 @@ function parseMultipartBody(req, contentType) {
 
     parser.on("file", (name, file, info) => {
       const chunks = [];
+      activeChunkLists.push(chunks);
 
       const filePromise = new Promise((resolveFile, rejectFile) => {
         file.on("data", chunk => {
+          if (limitExceeded) {
+            return;
+          }
           chunks.push(chunk);
         });
 
@@ -995,7 +1597,7 @@ async function saveUploadedImage(file, allowedTypesOverride) {
 
   const uploadsDir =
     pathModule.join(
-      process.cwd(),
+      __dirname,
       "uploads"
     );
 
@@ -1072,6 +1674,52 @@ function getVideoValidationError(files) {
   for (const file of files) {
 
     if (!file || !file.filename || !file.data.length) {
+
+// ======================================================
+// Проверка фактической сигнатуры содержимого видео
+// (расширение и MIME проверяются отдельно; содержимое — здесь).
+// ======================================================
+
+const MP4_BRANDS = [
+  "isom", "iso2", "iso3", "iso4", "iso5", "iso6",
+  "mp41", "mp42", "avc1", "avc3", "mmp4", "dash", "MSNV", "M4V ", "qt  "
+];
+
+function hasVideoSignature(data, contentType) {
+  if (!data || data.length < 12) {
+    return false;
+  }
+
+  if (contentType === "video/mp4" || contentType === "video/quicktime") {
+    // ISO Base Media File Format: размер бокса в байтах 0–3,
+    // тип бокса 'ftyp' в байтах 4–7, бренд в байтах 8–11.
+    if (data.toString("ascii", 4, 8) !== "ftyp") {
+      return false;
+    }
+    return MP4_BRANDS.includes(data.toString("ascii", 8, 12));
+  }
+
+  if (contentType === "video/webm") {
+    // EBML-сигнатура + DocType 'webm' в заголовке контейнера.
+    if (data[0] !== 0x1a || data[1] !== 0x45 || data[2] !== 0xdf || data[3] !== 0xa3) {
+      return false;
+    }
+    return data.slice(0, 40).includes("webm");
+  }
+
+  if (contentType === "video/ogg") {
+    // 'OggS' + Theora в заголовочной странице; аудио-only OGG
+    // (Vorbis/Opus) как видео не проходит.
+    if (data.toString("ascii", 0, 4) !== "OggS") {
+      return false;
+    }
+    const head = data.slice(0, 128);
+    return head.includes("theora") || head.includes("\u0080theo");
+  }
+
+  return false;
+}
+
       continue;
     }
 
@@ -1081,6 +1729,10 @@ function getVideoValidationError(files) {
 
     if (file.data.length > VIDEO_MAX_BYTES) {
       return VIDEO_ALLOWED_MESSAGE;
+
+    if (!hasVideoSignature(file.data, file.contentType)) {
+      return SIG_MESSAGE;
+    }
     }
   }
 
@@ -1118,7 +1770,7 @@ function saveUploadedVideo(file, allowedTypesOverride) {
 
   const uploadsDir =
     pathModule.join(
-      process.cwd(),
+      __dirname,
       "uploads"
     );
 
@@ -1137,6 +1789,11 @@ function saveUploadedVideo(file, allowedTypesOverride) {
       uploadsDir,
       filename
     );
+
+  // Сигнатура проверяется повторно непосредственно перед записью.
+  if (!hasVideoSignature(file.data, file.contentType)) {
+    throw new Error(VIDEO_ALLOWED_MESSAGE);
+  }
 
   writeFileSync(
     filePath,
@@ -1261,6 +1918,86 @@ function getDocumentValidationError(files) {
   for (const file of files) {
 
     if (!file || !file.filename || !file.data.length) {
+
+// ======================================================
+// Проверка фактического содержимого документов
+// (расширение и MIME проверяются отдельно; содержимое — здесь).
+// ======================================================
+
+const OLE_SIGNATURE = [
+  0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1
+];
+
+function hasOleSignature(data) {
+  return OLE_SIGNATURE.every((byte, index) => data[index] === byte);
+}
+
+function isZipContainer(data) {
+  return data.length >= 4 &&
+    data[0] === 0x50 && data[1] === 0x4b &&
+    data[2] === 0x03 && data[3] === 0x04;
+}
+
+function isUtf8Text(data) {
+  if (data.length === 0) {
+    return false;
+  }
+  // Бинарные файлы почти всегда содержат NUL-байты.
+  if (data.includes(0)) {
+    return false;
+  }
+  // Строгая проверка: декодирование падает на невалидном UTF-8.
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasDocumentSignature(data, contentType) {
+  if (!data || data.length < 4) {
+    return false;
+  }
+
+  if (contentType === "application/pdf") {
+    return data.toString("ascii", 0, 5) === "%PDF-";
+  }
+
+  if (contentType === "application/msword") {
+    // OLE-контейнер обязателен + поток WordDocument внутри,
+    // произвольный OLE-файл не проходит как DOC.
+    return hasOleSignature(data) && data.includes("WordDocument");
+  }
+
+  if (contentType === "application/vnd.ms-excel") {
+    // OLE-контейнер обязателен + поток Workbook/Book внутри,
+    // произвольный OLE-файл не проходит как XLS.
+    return hasOleSignature(data) &&
+      (data.includes("Workbook") || data.includes("Book"));
+  }
+
+  if (contentType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    // OOXML = ZIP-контейнер; обычный ZIP не проходит как DOCX.
+    return isZipContainer(data) &&
+      data.includes("[Content_Types].xml") &&
+      data.includes("word/");
+  }
+
+  if (contentType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+    return isZipContainer(data) &&
+      data.includes("[Content_Types].xml") &&
+      data.includes("xl/");
+  }
+
+  if (contentType === "text/plain") {
+    // Валидный UTF-8 без NUL-байтов; бинарник с расширением .txt не проходит.
+    return isUtf8Text(data);
+  }
+
+  return false;
+}
+
       continue;
     }
 
@@ -1270,6 +2007,10 @@ function getDocumentValidationError(files) {
 
     if (file.data.length > DOCUMENT_MAX_BYTES) {
       return DOCUMENT_ALLOWED_MESSAGE;
+
+    if (!hasDocumentSignature(file.data, file.contentType)) {
+      return SIG_MESSAGE;
+    }
     }
   }
 
@@ -1305,7 +2046,7 @@ function saveUploadedDocument(file, allowedTypesOverride) {
 
   const uploadsDir =
     pathModule.join(
-      process.cwd(),
+      __dirname,
       "uploads"
     );
 
@@ -1324,6 +2065,11 @@ function saveUploadedDocument(file, allowedTypesOverride) {
       uploadsDir,
       filename
     );
+
+  // Сигнатура проверяется повторно непосредственно перед записью.
+  if (!hasDocumentSignature(file.data, file.contentType)) {
+    throw new Error(DOCUMENT_ALLOWED_MESSAGE);
+  }
 
   writeFileSync(
     filePath,
@@ -1393,6 +2139,7 @@ function renderServiceRequestForm(values = {}, errors = {}) {
         name="request_token"
         value="${escapeHtml(values.request_token || createRequestToken())}"
       >
+      ${HONEYPOT_FIELD}
 
       <p>
         <label>
@@ -1820,6 +2567,7 @@ function renderRepairRequestForm(values = {}, errors = {}) {
         name="request_token"
         value="${escapeHtml(values.request_token || createRequestToken())}"
       >
+      ${HONEYPOT_FIELD}
 
       <p>
         <label>
@@ -1970,6 +2718,7 @@ function renderCallbackRequestForm(values = {}, errors = {}) {
         name="request_token"
         value="${escapeHtml(values.request_token || createRequestToken())}"
       >
+      ${HONEYPOT_FIELD}
 
       <p>
         <label>
@@ -2227,24 +2976,32 @@ function renderCategoryTree(
 
         |
 
-        <a
-          href="/admin/categories/toggle/${category.id}"
+        <form
+          method="POST"
+          action="/admin/categories/toggle/${category.id}"
+          class="inline-confirm-form"
         >
-          ${
-            category.hidden
-              ? "Показать"
-              : "Скрыть"
-          }
-        </a>
+          ${renderCsrfField()}
+          <button type="submit" class="link-like-button">
+            ${
+              category.hidden
+                ? "Показать"
+                : "Скрыть"
+            }
+          </button>
+        </form>
 
         |
 
-        <a
-          href="/admin/categories/delete/${category.id}"
-          onclick="return confirm('Удалить категорию?')"
+        <form
+          method="POST"
+          action="/admin/categories/delete/${category.id}"
+          class="inline-confirm-form"
+          onsubmit="return confirm('Удалить категорию?')"
         >
-          Удалить
-        </a>
+          ${renderCsrfField()}
+          <button type="submit" class="link-like-button">Удалить</button>
+        </form>
 
         ${renderCategoryTree(
           categories,
@@ -2580,12 +3337,15 @@ function renderProductCard(product, options = {}) {
   const adminActions = options.admin
     ? `<p class="product-card-admin">
         <a href="/edit-product/${product.id}">Редактировать</a>
-        <a href="/delete-product/${product.id}" onclick="return confirm('Удалить товар?')">Удалить</a>
+        <form method="POST" action="/delete-product/${product.id}" class="inline-confirm-form" onsubmit="return confirm('Удалить товар?')">
+          ${renderCsrfField()}
+          <button type="submit" class="link-like-button">Удалить</button>
+        </form>
       </p>`
     : "";
 
   return `
-    <li class="product-card">
+    <li class="product-card" data-fav-card="${product.id}">
       <a class="product-card-media" href="/product/${product.id}">
         ${product.image
           ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" loading="lazy">`
@@ -2601,8 +3361,8 @@ function renderProductCard(product, options = {}) {
       <div class="product-card-footer">
         ${priceHtml}
         <div class="product-card-actions">
-          <a class="product-card-action product-card-action--cart" href="/cart/add/${product.id}">В корзину</a>
-          <a class="product-card-action product-card-action--favorite" href="/favorites/toggle/${product.id}">${isFavorite ? "Убрать из избранного" : "В избранное"}</a>
+          <a class="product-card-action product-card-action--cart" href="/cart/add/${product.id}" data-cart-add data-product-id="${product.id}">В корзину</a>
+          <a class="product-card-action product-card-action--favorite" href="/favorites/toggle/${product.id}" data-fav-toggle data-product-id="${product.id}" aria-pressed="${isFavorite}">${isFavorite ? "Убрать из избранного" : "В избранное"}</a>
         </div>
         ${adminActions}
       </div>
@@ -2891,14 +3651,106 @@ function getCharacteristics() {
 // КОРЗИНА
 // ======================================================
 
+// ======================================================
+// SHOPPING COOKIES (cart / favs)
+// Корзина и избранное хранятся в cookie как JSON.
+// ======================================================
+
+const MAX_CART_QUANTITY = 99;
+const MAX_CART_ITEMS = 50;
+const MAX_FAVORITE_ITEMS = 100;
+
+// Изолированный декод для shopping-cookie: повреждённый percent-encoding
+// одной cookie не должен влиять на остальные cookies и на обработку запроса.
+function decodeShoppingCookie(raw) {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
+// Строгая нормализация корзины: отбрасываются позиции с некорректным
+// id/quantity (отрицательные, дробные, NaN, Infinity, выше максимума),
+// лишние позиции сверх MAX_CART_ITEMS.
+function normalizeCart(cart) {
+  const normalized = {};
+
+  if (!cart || typeof cart !== "object" || Array.isArray(cart)) {
+    return normalized;
+  }
+
+  // Ключи, опасные для prototype pollution, не допускаются.
+  const dangerousKeys = new Set(["__proto__", "constructor", "prototype"]);
+
+  for (const key of Object.keys(cart)) {
+    if (dangerousKeys.has(key)) {
+      continue;
+    }
+
+    const id = Number(key);
+
+    if (
+      !Number.isSafeInteger(id) ||
+      id <= 0 ||
+      !Number.isSafeInteger(cart[key])
+    ) {
+      continue;
+    }
+
+    const quantity = cart[key];
+
+    if (quantity < 1 || quantity > MAX_CART_QUANTITY) {
+      continue;
+    }
+
+    if (Object.keys(normalized).length >= MAX_CART_ITEMS) {
+      break;
+    }
+
+    normalized[id] = quantity;
+  }
+
+  return normalized;
+}
+
+// Строгая нормализация избранного: положительные безопасные целые ID
+// без дублей, максимум MAX_FAVORITE_ITEMS.
+function normalizeFavorites(favorites) {
+  if (!Array.isArray(favorites)) {
+    return [];
+  }
+
+  const normalized = [];
+
+  for (const id of favorites) {
+    if (!Number.isSafeInteger(id) || id <= 0 || normalized.includes(id)) {
+      continue;
+    }
+
+    if (normalized.length >= MAX_FAVORITE_ITEMS) {
+      break;
+    }
+
+    normalized.push(id);
+  }
+
+  return normalized;
+}
+
+
 function getCart(req) {
   const cookies =
     parseCookies(req);
 
   try {
-    return cookies.cart
-      ? JSON.parse(cookies.cart)
-      : {};
+    const decoded = cookies.cart
+      ? decodeShoppingCookie(cookies.cart)
+      : null;
+
+    return normalizeCart(
+      decoded ? JSON.parse(decoded) : {}
+    );
   } catch {
     return {};
   }
@@ -2941,17 +3793,16 @@ function getCartItems(req) {
         SELECT *
         FROM products
         WHERE id = ?
+          AND deleted = 0
       `).get(id);
 
     if (!product) {
       continue;
     }
 
-    const quantity =
-      Math.max(
-        1,
-        Number(cart[id]) || 1
-      );
+    // Корзина уже нормализована (normalizeCart): quantity здесь всегда
+    // безопасное целое число в диапазоне 1..MAX_CART_QUANTITY.
+    const quantity = cart[id];
 
     items.push({
       ...product,
@@ -2974,12 +3825,13 @@ function getFavorites(req) {
     parseCookies(req);
 
   try {
-    const value =
-      JSON.parse(cookies.favs || "[]");
+    const decoded = cookies.favs
+      ? decodeShoppingCookie(cookies.favs)
+      : null;
 
-    return Array.isArray(value)
-      ? value.map(Number).filter(Number.isInteger)
-      : [];
+    return normalizeFavorites(
+      decoded ? JSON.parse(decoded) : []
+    );
   } catch {
     return [];
   }
@@ -3020,6 +3872,53 @@ const server =
 
         const path =
           url.pathname;
+        // CSRF double-submit: токен в cookie + тот же токен в meta/формах.
+        // Выдаётся на любой запрос, если cookie ещё нет.
+        {
+          const existingCsrf = parseCookies(req).csrf_token;
+          if (existingCsrf && /^[a-f0-9]{64}$/.test(existingCsrf)) {
+            currentCsrfToken = existingCsrf;
+          } else {
+            currentCsrfToken = randomBytes(32).toString("hex");
+            res.setHeader(
+              "Set-Cookie",
+              `csrf_token=${currentCsrfToken}; Path=/; SameSite=Lax; Max-Age=604800`
+            );
+          }
+        }
+
+        // ======================================================
+        // SECURITY HEADERS (для всех ответов этого запроса).
+        // HSTS не включаем: HTTPS появится после reverse proxy на VPS.
+        // ======================================================
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("X-Frame-Options", "SAMEORIGIN");
+        res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+        res.setHeader(
+          "Permissions-Policy",
+          "camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=()"
+        );
+        res.setHeader(
+          "Content-Security-Policy",
+          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+        );
+
+        // Админ-зоны и персональные страницы не кешируются.
+        if (
+          path.startsWith("/admin") ||
+          path.startsWith("/orders") ||
+          path.startsWith("/edit-product") ||
+          path.startsWith("/add-product") ||
+          path.startsWith("/delete-product") ||
+          path.startsWith("/product-images/") ||
+          path.startsWith("/product-videos/") ||
+          path.startsWith("/product-documents/") ||
+          path === "/cart" ||
+          path === "/favorites" ||
+          path === "/checkout"
+        ) {
+          res.setHeader("Cache-Control", "no-store");
+        }
 
         if (
           req.method === "GET" &&
@@ -3036,6 +3935,24 @@ const server =
               "Content-Type": "text/css; charset=utf-8"
             });
             return res.end(stylesheet);
+          } catch {
+            return sendHtml(res, "Файл не найден", 404);
+          }
+        }
+
+        // Статические SVG-ассеты (логотип и favicon) — точный whitelist.
+        if (
+          req.method === "GET" &&
+          (path === "/public/img/logo.svg" || path === "/public/img/favicon.svg")
+        ) {
+          try {
+            const image = await fs.readFile(
+              pathModule.join(__dirname, "public", "img", path.split("/").pop())
+            );
+            res.writeHead(200, {
+              "Content-Type": "image/svg+xml"
+            });
+            return res.end(image);
           } catch {
             return sendHtml(res, "Файл не найден", 404);
           }
@@ -3114,6 +4031,18 @@ if (
   req.method === "GET" &&
   path === "/search-suggestions"
 ) {
+  // Rate limit ДО CPU-затратного поиска (Levenshtein) и обращения к БД.
+  const suggestionsRateLimit = enforceRateLimit(req, "/search-suggestions");
+
+  if (!suggestionsRateLimit.allowed) {
+    console.log("[security] rate limit exceeded: /search-suggestions ip=" + getClientIp(req));
+    res.writeHead(429, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Retry-After": String(suggestionsRateLimit.retryAfter)
+    });
+    return res.end(JSON.stringify({ error: "Слишком много запросов. Попробуйте позже." }));
+  }
+
   const query =
   url.searchParams
     .get("q")
@@ -3257,14 +4186,41 @@ if (
             ? aboutPage.content.trim().split(/\s+/).slice(0, 35).join(" ")
             : "";
 
-          const mainCategories = db.prepare(`
-            SELECT id, name
-            FROM categories
-            WHERE parent_id IS NULL
-            ORDER BY sort_order, id
-          `).all();
-
           const contacts = getContactSettings();
+
+          // Статистика первого экрана: временные значения эталона
+          // (HOME_STATS_PLACEHOLDER), не рассчитываются из тестовой БД.
+          const homeStatsHtml = `
+            <section class="home-stats" aria-label="Ключевые показатели">
+              ${HOME_STATS_PLACEHOLDER.map(item => `
+                <div class="home-stats-item">
+                  <div class="home-stats-value">${escapeHtml(item.value)}</div>
+                  <div class="home-stats-label">${escapeHtml(item.label)}</div>
+                </div>
+              `).join("")}
+            </section>
+          `;
+
+          // Hero: реальный баннер имеет приоритет, иначе placeholder первого экрана.
+          // hero-fallback.jpg уже содержит утверждённое затемнение, поэтому
+          // navy-overlay выводится только поверх «сырого» фото из админки.
+          const heroData = mainBanner
+            ? {
+                title: mainBanner.title,
+                description: mainBanner.description || "",
+                buttonText: mainBanner.button_text,
+                buttonUrl: mainBanner.button_url,
+                image: mainBanner.image || HERO_PLACEHOLDER.image,
+                overlay: Boolean(mainBanner.image)
+              }
+            : {
+                title: HERO_PLACEHOLDER.title,
+                description: HERO_PLACEHOLDER.description,
+                buttonText: HERO_PLACEHOLDER.buttonText,
+                buttonUrl: HERO_PLACEHOLDER.buttonUrl,
+                image: HERO_PLACEHOLDER.image,
+                overlay: false
+              };
 
           return sendHtml(
             res,
@@ -3272,89 +4228,48 @@ if (
               req,
               "Karimoff",
               `
-                ${
-                  mainBanner
-                    ? `
-                      <section>
-                        ${
-                          mainBanner.image
-                            ? `
-                              <p>
-                                <img
-                                  src="${escapeHtml(mainBanner.image)}"
-                                  alt="${escapeHtml(mainBanner.title)}"
-                                  style="max-width:100%; max-height:400px;"
-                                >
-                              </p>
-                            `
-                            : ""
-                        }
-                        <h1>${escapeHtml(mainBanner.title)}</h1>
-                        <p>${escapeHtml(mainBanner.description)}</p>
-                        <p>
-                          <a href="${escapeHtml(mainBanner.button_url)}">
-                            ${escapeHtml(mainBanner.button_text)}
-                          </a>
-                        </p>
-                      </section>
-                    `
-                    : ""
-                }
+                <div class="home-top">
+                <section class="home-hero">
+                  ${
+                    heroData.overlay
+                      ? `<div class="home-hero-overlay" aria-hidden="true"></div>`
+                      : ""
+                  }
+                  <div class="home-hero-media" aria-hidden="true">
+                    <img src="${escapeHtml(heroData.image)}" alt="">
+                  </div>
+                  <div class="home-hero-inner">
+                    <div class="home-hero-text">
+                      <p class="home-hero-overline">${escapeHtml(contacts.contact_address || TOPBAR_PLACEHOLDER.address)}</p>
+                      <h1>${escapeHtml(heroData.title)}</h1>
+                      ${
+                        heroData.description
+                          ? `<p class="home-hero-description">${escapeHtml(heroData.description)}</p>`
+                          : ""
+                      }
+                      <div class="home-hero-actions">
+                        <a class="home-hero-cta home-hero-cta--primary" href="${escapeHtml(heroData.buttonUrl)}">
+                          ${escapeHtml(heroData.buttonText)}
+                        </a>
+                        <a class="home-hero-cta home-hero-cta--ghost" href="/services">Наши услуги</a>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+                ${homeStatsHtml}
 
-                <h1>Karimoff</h1>
-
-                <p>
-                  Добро пожаловать
-                  на сайт Karimoff!
-                </p>
-
-                <p class="home-cta">
-                  <a class="cta-button" href="/catalog">Каталог</a>
-                  <a class="cta-button" href="/services">Услуги</a>
-                  <a class="cta-button" href="/#contacts">Контакты</a>
-                </p>
-
-                <h2>Основные направления</h2>
-
-                <ul>
-                  <li>
-                    <a href="/catalog">Продажа техники</a>
-                  </li>
-                  <li>
-                    <a href="/repair-request">Ремонт</a>
-                  </li>
-                  <li>
-                    <a href="/services">Услуги под ключ</a>
-                  </li>
-                </ul>
-
-                ${
-                  mainCategories.length > 0
-                    ? `
-                      <h2>Основные категории каталога</h2>
-
-                      <ul>
-                        ${mainCategories.map(category => `
-                          <li>
-                            <a href="/catalog?category=${category.id}">${escapeHtml(category.name)}</a>
-                          </li>
-                        `).join("")}
-                      </ul>
-                    `
-                    : ""
-                }
-
-                ${
-                  aboutPage
-                    ? `
-                      <section>
-                        <h2>${escapeHtml(aboutPage.title)}</h2>
-                        <p>${escapeHtml(aboutPreview)}${aboutPage.content.trim().split(/\s+/).length > 35 ? "…" : ""}</p>
-                        <p><a href="/about">Подробнее об О компании</a></p>
-                      </section>
-                    `
-                    : ""
-                }
+                <div class="home-below">
+                  ${
+                    aboutPage
+                      ? `
+                        <section>
+                          <h2>${escapeHtml(aboutPage.title)}</h2>
+                          <p>${escapeHtml(aboutPreview)}${aboutPage.content.trim().split(/\s+/).length > 35 ? "…" : ""}</p>
+                          <p><a href="/about">Подробнее об О компании</a></p>
+                        </section>
+                      `
+                      : ""
+                  }
 
                 ${
                   services.length > 0
@@ -3538,62 +4453,93 @@ if (
             renderPage(
               req,
               "Услуги",
-              `
+            `
+              <h1>Услуги</h1>
 
-                <h1>Услуги</h1>
-                ${services.length > 0
+              ${
+                services.length > 0
                   ? `
-                    <ul>
-                      ${services.map(service => `
-                        <li>
-                          <h2>${escapeHtml(service.name)}</h2>
-                          ${service.image
-                            ? `
-                              <p>
-                                <img
-                                  src="${escapeHtml(service.image)}"
-                                  alt="${escapeHtml(service.name)}"
-                                  style="max-width:200px; max-height:200px;"
-                                >
+                    <ul class="service-cards">
+                      ${services.map(service => {
+                        const serviceGalleryImages = db.prepare("SELECT image FROM service_images WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
+                        const serviceTariffs = db.prepare("SELECT name, price, unit FROM service_tariffs WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
+                        const serviceCharacteristics = db.prepare("SELECT name, value FROM service_characteristics WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
+                        const isRental = service.service_type === "Rental";
+                        const serviceUnit = service.unit || "шт.";
+
+                        return `
+                          <li class="service-card">
+                            <div class="service-card-media">
+                              ${
+                                service.image
+                                  ? `<img src="${escapeHtml(service.image)}" alt="${escapeHtml(service.name)}" loading="lazy">`
+                                  : `<span class="service-card-media-placeholder" aria-hidden="true">Нет фото</span>`
+                              }
+                              <span class="service-card-type${isRental ? " service-card-type--rental" : ""}">${isRental ? "Аренда" : "Услуга"}</span>
+                            </div>
+
+                            <div class="service-card-body">
+                              <h2 class="service-card-name">${escapeHtml(service.name)}</h2>
+
+                              ${service.short_description ? `<p class="service-card-desc">${escapeHtml(service.short_description)}</p>` : ""}
+
+                              ${
+                                serviceCharacteristics.length
+                                  ? `<ul class="service-card-specs">${serviceCharacteristics.slice(0, 4).map(item => `
+                                      <li>
+                                        <span class="service-card-spec-name">${escapeHtml(item.name)}</span>
+                                        <span class="service-card-spec-value">${escapeHtml(item.value)}</span>
+                                      </li>`).join("")}</ul>`
+                                  : ""
+                              }
+
+                              ${
+                                serviceGalleryImages.length
+                                  ? `<div class="service-card-gallery">${serviceGalleryImages.map(image => `
+                                      <img src="${escapeHtml(image.image)}" alt="Дополнительное фото: ${escapeHtml(service.name)}" loading="lazy">`).join("")}</div>`
+                                  : ""
+                              }
+
+                              ${service.video ? `<video class="service-card-video" src="${escapeHtml(service.video)}" controls preload="metadata"></video>` : ""}
+
+                              <p class="service-card-meta">
+                                ${service.region ? `<span>Регион: ${escapeHtml(service.region)}</span>` : ""}
+                                ${isRental ? `<span>Мин. аренда: ${escapeHtml(service.min_rental_hours ?? 2)} ч</span>` : ""}
                               </p>
-                            `
-                            : ""}
-                          ${db.prepare("SELECT image FROM service_images WHERE service_id = ? ORDER BY sort_order, id").all(service.id).map(image => `
-                            <p>
-                              <img
-                                src="${escapeHtml(image.image)}"
-                                alt="Дополнительное фото: ${escapeHtml(service.name)}"
-                                style="max-width:200px; max-height:200px;"
-                              >
-                            </p>
-                          `).join("")}
-                          ${service.video ? `<p><video src="${escapeHtml(service.video)}" controls preload="metadata" style="max-width:100%;"></video></p>` : ""}
-                          <p><strong>${service.price_on_request ? "Цена по запросу" : `${escapeHtml(service.price)} ${escapeHtml(service.unit || "шт.")}`}</strong></p>
-                          <p>Тип: ${service.service_type === "Rental" ? "Аренда (Rental)" : "Услуга (Service)"}</p>
-                          ${service.region ? `<p>Регион: ${escapeHtml(service.region)}</p>` : ""}
-                          ${service.service_type === "Rental" ? `<p>Минимальная аренда: ${escapeHtml(service.min_rental_hours ?? 2)} ч</p>` : ""}
-                          ${(() => {
-                            const tariffs = db.prepare("SELECT name, price, unit FROM service_tariffs WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
-                            return tariffs.length
-                              ? `<ul>${tariffs.map(tariff => `<li><strong>${escapeHtml(tariff.name)}:</strong> ${escapeHtml(tariff.price)} ${escapeHtml(tariff.unit)}</li>`).join("")}</ul>`
-                              : "";
-                          })()}
-                          <p>${escapeHtml(service.short_description || "")}</p>
-                          ${(() => {
-                            const characteristics = db.prepare("SELECT name, value FROM service_characteristics WHERE service_id = ? ORDER BY sort_order, id").all(service.id);
-                            return characteristics.length
-                              ? `<ul>${characteristics.map(item => `<li><strong>${escapeHtml(item.name)}:</strong> ${escapeHtml(item.value)}</li>`).join("")}</ul>`
-                              : "";
-                          })()}
-                          <p>
-                            <a href="/service-request?service_id=${service.id}">Оставить заявку</a>
-                          </p>
-                        </li>
-                      `).join("")}
+
+                              ${
+                                serviceTariffs.length
+                                  ? `<ul class="service-card-tariffs">${serviceTariffs.map(tariff => `
+                                      <li><strong>${escapeHtml(tariff.name)}</strong><span>${escapeHtml(tariff.price)} ${escapeHtml(tariff.unit)}</span></li>`).join("")}</ul>`
+                                  : ""
+                              }
+                            </div>
+
+                            <div class="service-card-footer">
+                              <p class="service-card-price">
+                                ${
+                                  service.price_on_request
+                                    ? `<span class="service-card-price-value">Цена по запросу</span>`
+                                    : `<span class="service-card-price-value">${escapeHtml(service.price)}</span> <span class="service-card-price-unit">/ ${escapeHtml(serviceUnit)}</span>`
+                                }
+                              </p>
+                              <a class="service-card-cta" href="/service-request?service_id=${service.id}">Оставить заявку</a>
+                            </div>
+                          </li>
+                        `;
+                      }).join("")}
                     </ul>
                   `
-                  : "<p>Опубликованных услуг пока нет.</p>"}
-              `
+                  : `
+                    <div class="services-empty">
+                      <h2>Опубликованных услуг пока нет</h2>
+                      <p>Раздел скоро наполнится — а пока посмотрите технику и оборудование в каталоге.</p>
+                      <a class="services-empty-cta" href="/catalog">Перейти в каталог</a>
+                    </div>
+                  `
+              }
+            `
+
             )
           );
         }
@@ -3679,30 +4625,53 @@ if (
               "Новости",
               `
                 <h1>Новости</h1>
-                ${news.length > 0
-                  ? `
-                    <ul>
-                      ${news.map(item => `
-                        <li>
-                          <h2>${escapeHtml(item.title)}</h2>
-                          ${newsImageList(item).map((img, idx) => `
-                            <p>
-                              <img
-                                src="${escapeHtml(img)}"
-                                alt="${escapeHtml(item.title)}${idx === 0 ? "" : " — фото " + (idx + 1)}"
-                                style="max-width:200px; max-height:200px;"
-                              >
-                            </p>
-                          `).join("")}
-                          <p>${escapeHtml(item.short_text || "")}</p>
-                        </li>
-                      `).join("")}
-                    </ul>
-                  `
-                  : "<p>Опубликованных новостей пока нет.</p>"}
+
+                ${
+                  news.length > 0
+                    ? `
+                      <ul class="news-cards">
+                        ${news.map(item => {
+                          const itemImages = newsImageList(item);
+                          const galleryImages = itemImages.slice(1);
+
+                          return `
+                            <li class="news-card">
+                              <div class="news-card-media">
+                                ${
+                                  itemImages[0]
+                                    ? `<img src="${escapeHtml(itemImages[0])}" alt="${escapeHtml(item.title)}" loading="lazy">`
+                                    : `<span class="news-card-media-placeholder" aria-hidden="true">Нет фото</span>`
+                                }
+                              </div>
+
+                              <div class="news-card-body">
+                                <h2 class="news-card-title">${escapeHtml(item.title)}</h2>
+
+                                ${item.short_text ? `<p class="news-card-text">${escapeHtml(item.short_text)}</p>` : ""}
+
+                                ${
+                                  galleryImages.length
+                                    ? `<div class="news-card-gallery">${galleryImages.map((img, idx) => `
+                                        <img src="${escapeHtml(img)}" alt="${escapeHtml(item.title)} — фото ${idx + 2}" loading="lazy">`).join("")}</div>`
+                                    : ""
+                                }
+                              </div>
+                            </li>
+                          `;
+                        }).join("")}
+                      </ul>
+                    `
+                    : `
+                      <div class="news-empty">
+                        <h2>Новостей пока нет</h2>
+                        <p>Мы готовим для вас свежие публикации — загляните немного позже.</p>
+                      </div>
+                    `
+                }
               `
             )
           );
+
         }
 
         if (
@@ -3746,30 +4715,53 @@ if (
               "Проекты",
               `
                 <h1>Проекты</h1>
-                ${projects.length > 0
-                  ? `
-                    <ul>
-                      ${projects.map(project => `
-                        <li>
-                          <h2>${escapeHtml(project.name)}</h2>
-                          ${projectImageList(project).map((img, idx) => `
-                            <p>
-                              <img
-                                src="${escapeHtml(img)}"
-                                alt="${escapeHtml(project.name)}${idx === 0 ? "" : " — фото " + (idx + 1)}"
-                                style="max-width:200px; max-height:200px;"
-                              >
-                            </p>
-                          `).join("")}
-                          <p>${escapeHtml(project.description || "")}</p>
-                        </li>
-                      `).join("")}
-                    </ul>
-                  `
-                  : "<p>Опубликованных проектов пока нет.</p>"}
+
+                ${
+                  projects.length > 0
+                    ? `
+                      <ul class="project-cards">
+                        ${projects.map(project => {
+                          const projectImages = projectImageList(project);
+                          const galleryImages = projectImages.slice(1);
+
+                          return `
+                            <li class="project-card">
+                              <div class="project-card-media">
+                                ${
+                                  projectImages[0]
+                                    ? `<img src="${escapeHtml(projectImages[0])}" alt="${escapeHtml(project.name)}" loading="lazy">`
+                                    : `<span class="project-card-media-placeholder" aria-hidden="true">Нет фото</span>`
+                                }
+                              </div>
+
+                              <div class="project-card-body">
+                                <h2 class="project-card-title">${escapeHtml(project.name)}</h2>
+
+                                ${project.description ? `<p class="project-card-text">${escapeHtml(project.description)}</p>` : ""}
+
+                                ${
+                                  galleryImages.length
+                                    ? `<div class="project-card-gallery">${galleryImages.map((img, idx) => `
+                                        <img src="${escapeHtml(img)}" alt="${escapeHtml(project.name)} — фото ${idx + 2}" loading="lazy">`).join("")}</div>`
+                                    : ""
+                                }
+                              </div>
+                            </li>
+                          `;
+                        }).join("")}
+                      </ul>
+                    `
+                    : `
+                      <div class="projects-empty">
+                        <h2>Проектов пока нет</h2>
+                        <p>Мы готовим для вас примеры выполненных работ — загляните немного позже.</p>
+                      </div>
+                    `
+                }
               `
             )
           );
+
         }
 
         // ==================================================
@@ -3957,10 +4949,18 @@ if (
                   <h1>Контакты</h1>
 
                   <form method="POST" action="/admin/contacts">
+                  ${renderCsrfField()}
                     <p>
                       <label>
                         Телефон:
                         <input type="tel" name="contact_phone" value="${escapeHtml(values.contact_phone)}">
+                      </label>
+                    </p>
+
+                    <p>
+                      <label>
+                        Телефон 2:
+                        <input type="tel" name="contact_phone_2" value="${escapeHtml(values.contact_phone_2)}">
                       </label>
                     </p>
 
@@ -4048,6 +5048,10 @@ if (
             }
 
             const params = await readBody(req);
+
+            if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+              return sendCsrfForbidden(res, req);
+            }
             const values = Object.fromEntries(
               contactSettingKeys.map(key => [
                 key,
@@ -4113,6 +5117,7 @@ if (
                    method="POST"
                    action="/admin/settings"
                  >
+                 ${renderCsrfField()}
                    <p>
                      <label>
                        Рабочий email:
@@ -4150,6 +5155,10 @@ if (
 
             const params =
               await readBody(req);
+
+            if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+              return sendCsrfForbidden(res, req);
+            }
 
             const email =
               params.get("orders_email")?.trim() || "";
@@ -4231,6 +5240,7 @@ if (
                   method="POST"
                   action="/admin/characteristics"
                 >
+                ${renderCsrfField()}
 
                   <p>
                     Название характеристики:
@@ -4286,16 +5296,38 @@ if (
           path === "/admin"
         ) {
 
+          // Brute-force защита: блокировка проверяется ДО проверки пароля.
+          const clientIp = getClientIp(req);
+
+          if (isAdminLoginBlocked(clientIp)) {
+            const retryAfter = getAdminLoginRetryAfter(clientIp);
+            console.log("[security] admin login blocked: ip=" + clientIp);
+            return sendHtml(
+              res,
+              renderPage(
+                req,
+                "Слишком много попыток входа",
+                `
+                  <h1>Слишком много попыток входа</h1>
+
+                  <p>
+                    Доступ временно ограничен. Попробуйте позже.
+                  </p>
+                `
+              ),
+              429,
+              { "Retry-After": String(retryAfter) }
+            );
+          }
+
           const params =
             await readBody(req);
 
           const password =
             params.get("password");
 
-          if (
-            password !==
-            ADMIN_PASSWORD
-          ) {
+          if (!verifyAdminPassword(password)) {
+            recordAdminLoginFailure(clientIp);
 
             return sendHtml(
               res,
@@ -4323,6 +5355,8 @@ if (
             );
           }
 
+
+          clearAdminLoginFailures(clientIp);
 
           adminToken =
             randomBytes(
@@ -4364,6 +5398,10 @@ if (
 
           const params =
             await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
 
           const name =
             params.get("name");
@@ -4530,6 +5568,7 @@ if (
                         method="POST"
                         action="/admin/category-characteristics"
                       >
+                      ${renderCsrfField()}
                         <input
                           type="hidden"
                           name="category_id"
@@ -4573,6 +5612,10 @@ if (
           }
 
           const params = await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const categoryId = Number(
             params.get("category_id")
           );
@@ -5187,14 +6230,10 @@ if (selectedCharacteristicIds.length > 0) {
           </div>
         ` : ""}
 
-        <p>
-          Найдено товаров: ${products.length}
-        </p>
+        ${isAdmin(req) ? "" : `<div class="catalog-layout"><aside class="catalog-side">`}
 
-
-
-<details id="catalog-filters">
-  <summary>Фильтры</summary>
+        <details id="catalog-filters">
+          <summary>Фильтры</summary>
 
   <form method="GET" action="/catalog">
 
@@ -5329,19 +6368,23 @@ if (selectedCharacteristicIds.length > 0) {
 
   <select name="sort">
     <option value="" ${sort === "" ? "selected" : ""}>
-      По умолчанию
+      Стандартный порядок
     </option>
 
     <option value="price_asc" ${sort === "price_asc" ? "selected" : ""}>
-      Дешевле
+      Сначала дешевле
     </option>
 
     <option value="price_desc" ${sort === "price_desc" ? "selected" : ""}>
-      Дороже
+      Сначала дороже
+    </option>
+
+    <option value="new" ${sort === "new" ? "selected" : ""}>
+      По новизне
     </option>
 
     <option value="popular" ${sort === "popular" ? "selected" : ""}>
-      Популярные
+      По рекомендуемым
     </option>
   </select>
 </fieldset>
@@ -5358,21 +6401,39 @@ if (selectedCharacteristicIds.length > 0) {
 
 </details>
 
+        ${isAdmin(req) ? "" : `</aside><div class="catalog-main">`}
+
+        <p class="catalog-count">
+          Найдено товаров: ${products.length}
+        </p>
+
         <p class="catalog-category-links">
           ${categoryLinks}
         </p>
 
         ${productsHtml}
 
+        ${isAdmin(req) ? "" : `</div></div>`}
+
 <script>
   const catalogFilters = document.getElementById("catalog-filters");
   const adminCatalogToolbar = document.querySelector(".admin-catalog-toolbar");
-  const publicSiteNav = document.querySelector("body.catalog-page > .public-site-nav");
+  const isAdminCatalogPage = document.body.classList.contains("admin-panel-page");
+  const publicSiteNav = document.querySelector(".site-header .site-header-inner");
   const headerSearchForm = adminCatalogToolbar?.querySelector('form[action="/catalog"]')
     || publicSiteNav?.querySelector('form[action="/catalog"]');
 
-  if (catalogFilters && headerSearchForm) {
+  if (catalogFilters && headerSearchForm && isAdminCatalogPage) {
     headerSearchForm.after(catalogFilters);
+  }
+
+  if (catalogFilters && !isAdminCatalogPage) {
+    const filtersDesktop = window.matchMedia("(min-width: 961px)");
+    const syncFiltersMode = () => { catalogFilters.open = filtersDesktop.matches; };
+    if (filtersDesktop.addEventListener) {
+      filtersDesktop.addEventListener("change", syncFiltersMode);
+    }
+    syncFiltersMode();
   }
 
   const searchInput =
@@ -5414,14 +6475,17 @@ searchInput.addEventListener("input", async () => {
     return;
   }
 
- searchSuggestions.innerHTML =
-  suggestions.map(product =>
-    '<div class="search-suggestion" data-value="' +
-    product.name.replace(/"/g, "&quot;") +
-    '">' +
-    product.name +
-    '</div>'
-  ).join("");
+  // Безопасный рендер: имя товара вставляется через textContent/setAttribute,
+  // что исключает HTML/JS-инъекцию независимо от содержимого БД.
+  searchSuggestions.replaceChildren(
+    ...suggestions.map(product => {
+      const suggestion = document.createElement("div");
+      suggestion.className = "search-suggestion";
+      suggestion.setAttribute("data-value", product.name);
+      suggestion.textContent = product.name;
+      return suggestion;
+    })
+  );
 
   searchSuggestions.style.display = "block";
 });
@@ -5569,6 +6633,7 @@ if (req.method === "GET" && path === "/buy-one-click") {
              name="one_click_token"
              value="${escapeHtml(oneClickToken)}"
            >
+           ${HONEYPOT_FIELD}
 
            <p>
             <label>
@@ -5705,14 +6770,26 @@ if (
 
   let characteristicsHtml = "";
 
-  for (const characteristic of characteristics) {
-      characteristicsHtml += `
-      <p class="product-characteristic">
-        <strong>
-          ${escapeHtml(characteristic.name)}:
-        </strong>
-        ${escapeHtml(characteristic.value || "")}
-      </p>
+  if (characteristics.length > 0) {
+    const characteristicRows = characteristics
+      .map(
+        characteristic => `
+          <tr>
+            <th scope="row">${escapeHtml(characteristic.name)}</th>
+            <td>${escapeHtml(characteristic.value || "—")}</td>
+          </tr>`
+      )
+      .join("");
+
+    characteristicsHtml = `
+      <section class="product-section">
+        <h2 class="product-section-title">Характеристики</h2>
+        <table class="product-specs-table">
+          <tbody>
+            ${characteristicRows}
+          </tbody>
+        </table>
+      </section>
     `;
   }
 
@@ -5727,33 +6804,56 @@ if (
         image
     `).all(id);
 
-  let galleryHtml = "";
+  // Все изображения товара одним списком: главное + галерея без дублей.
+  const mediaImages = [
+    ...(product.image ? [product.image] : []),
+    ...galleryImages
+      .map(galleryImage => galleryImage.image)
+      .filter(image => image !== product.image)
+  ];
 
-  if (galleryImages.length > 0) {
-    galleryHtml += `
-      <h2>
-        Галерея
-      </h2>
+  let mediaHtml = "";
 
-      <div class="product-gallery">
+  if (mediaImages.length > 0) {
+    mediaHtml += `
+      <figure class="product-detail-media">
+        <div class="product-detail-media-frame" id="product-media-frame">
+          <img
+            id="product-detail-main-image"
+            class="product-detail-main-image"
+            src="${escapeHtml(mediaImages[0])}"
+            alt="${escapeHtml(product.name)}"
+          >
+        </div>
+      </figure>
     `;
 
-    for (const galleryImage of galleryImages) {
-      galleryHtml += `
-        <a href="${escapeHtml(galleryImage.image)}">
-          <img
-            src="${escapeHtml(galleryImage.image)}"
-            alt="${escapeHtml(product.name)}"
-            class="product-gallery-image"
-            width="150"
-            style="margin:4px;"
-          >
-        </a>
+    if (mediaImages.length > 1) {
+      mediaHtml += `
+        <div class="product-detail-thumbs">
+          ${mediaImages
+            .map(
+              (image, index) => `
+            <button
+              type="button"
+              class="product-detail-thumb${index === 0 ? " is-active" : ""}"
+              data-image="${escapeHtml(image)}"
+              aria-label="Фото ${index + 1}"
+            >
+              <img src="${escapeHtml(image)}" alt="" loading="lazy">
+            </button>`
+            )
+            .join("")}
+        </div>
       `;
     }
-
-    galleryHtml += `
-      </div>
+  } else {
+    mediaHtml += `
+      <figure class="product-detail-media">
+        <div class="product-detail-media-frame">
+          <span class="product-detail-no-photo">Нет фото</span>
+        </div>
+      </figure>
     `;
   }
 
@@ -5772,26 +6872,22 @@ if (
 
   if (productVideos.length > 0) {
     videoHtml += `
-      <h2>
-        Видео
-      </h2>
-
-      <div>
-    `;
-
-    for (const productVideo of productVideos) {
-      videoHtml += `
-        <video
-          src="${escapeHtml(productVideo.video)}"
-          controls
-          width="360"
-          style="margin:4px; max-width:100%;"
-        ></video>
-      `;
-    }
-
-    videoHtml += `
-      </div>
+      <section class="product-section">
+        <h2 class="product-section-title">Видео</h2>
+        <div class="product-videos">
+          ${productVideos
+            .map(
+              productVideo => `
+            <video
+              class="product-video"
+              src="${escapeHtml(productVideo.video)}"
+              controls
+              playsinline
+            ></video>`
+            )
+            .join("")}
+        </div>
+      </section>
     `;
   }
 
@@ -5843,32 +6939,29 @@ if (
 
   if (productDocuments.length > 0) {
     documentHtml += `
-      <h2>
-        Документы
-      </h2>
+      <section class="product-section">
+        <h2 class="product-section-title">Документы</h2>
+        <ul class="product-docs-list">
+          ${productDocuments
+            .map(productDocument => {
+              const documentName =
+                productDocument.document
+                  .split("/")
+                  .pop();
 
-      <ul>
-    `;
-
-    for (const productDocument of productDocuments) {
-      const documentName =
-        productDocument.document
-          .split("/")
-          .pop();
-
-      documentHtml += `
-        <li>
-          <a
-            href="${escapeHtml(productDocument.document)}"
-            target="_blank"
-            rel="noopener"
-          >${escapeHtml(documentName)}</a>
-        </li>
-      `;
-    }
-
-    documentHtml += `
-      </ul>
+              return `
+            <li>
+              <svg class="product-docs-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5L9 1zm0 1.4L11.6 5H9V2.4zM4 14V2h4v4h4v8H4z"/></svg>
+              <a
+                href="${escapeHtml(productDocument.document)}"
+                target="_blank"
+                rel="noopener"
+              >${escapeHtml(documentName)}</a>
+            </li>`;
+            })
+            .join("")}
+        </ul>
+      </section>
     `;
   }
 
@@ -5888,19 +6981,103 @@ if (
     const recommendationFavoriteIds = getFavorites(req);
 
     recommendationHtml += `
-      <h2>
-        Рекомендованные товары
-      </h2>
-
-      <ul class="product-cards">
-        ${recommendedProducts.map(recommendedProduct => renderProductCard(recommendedProduct, {
-          favoriteIds: recommendationFavoriteIds,
-          brandName: recommendationBrandNames.get(recommendedProduct.brand_id) || "",
-          characteristics: recommendationCharacteristics.get(recommendedProduct.id) || []
-        })).join("")}
-      </ul>
+      <section class="product-recommendations">
+        <h2 class="product-section-title">Рекомендованные товары</h2>
+        <ul class="product-cards">
+          ${recommendedProducts.map(recommendedProduct => renderProductCard(recommendedProduct, {
+            favoriteIds: recommendationFavoriteIds,
+            brandName: recommendationBrandNames.get(recommendedProduct.brand_id) || "",
+            characteristics: recommendationCharacteristics.get(recommendedProduct.id) || []
+          })).join("")}
+        </ul>
+      </section>
     `;
   }
+
+  const currencyLabel = escapeHtml(product.currency || "BYN");
+  const unitLabel = escapeHtml(product.unit || "");
+  const discountPercent = Number(product.discount_percent) || 0;
+  const hasDiscount = discountPercent > 0 && !product.price_on_request;
+  const discountedPrice = hasDiscount
+    ? product.price * (1 - discountPercent / 100)
+    : product.price;
+  const discountedPriceText = Number.isInteger(discountedPrice)
+    ? String(discountedPrice)
+    : discountedPrice.toFixed(2);
+
+  let priceHtml = "";
+
+  if (product.price_on_request) {
+    priceHtml = `
+      <p class="product-detail-price">
+        <span class="product-detail-price-current">Цена по запросу</span>
+      </p>
+    `;
+  } else {
+    priceHtml = `
+      <p class="product-detail-price">
+        ${hasDiscount ? `<s class="product-detail-price-old">${escapeHtml(product.price)} ${currencyLabel}</s>` : ""}
+        <span class="product-detail-price-current">${hasDiscount ? discountedPriceText : escapeHtml(product.price)} ${currencyLabel}</span>
+        ${unitLabel ? `<span class="product-detail-price-unit">/ ${unitLabel}</span>` : ""}
+        ${hasDiscount ? `<span class="product-detail-price-discount">−${discountPercent}%</span>` : ""}
+      </p>
+    `;
+  }
+
+  const badges = [
+    discountPercent > 0
+      ? `<span class="product-card-badge product-card-badge--discount">Акция</span>`
+      : "",
+    product.is_hit
+      ? `<span class="product-card-badge product-card-badge--hit">Хит</span>`
+      : "",
+    product.is_new
+      ? `<span class="product-card-badge product-card-badge--new">Новинка</span>`
+      : "",
+    product.availability === "on_order"
+      ? `<span class="product-card-badge product-card-badge--order">Под заказ</span>`
+      : ""
+  ].filter(Boolean).join("");
+
+  const stockLabels = {
+    in_stock: "В наличии",
+    on_order: "Под заказ",
+    out_of_stock: "Нет в наличии"
+  };
+
+  const stockHtml = product.availability
+    ? `<p class="product-card-stock product-card-stock--${escapeHtml(product.availability)}">${escapeHtml(stockLabels[product.availability] || "Нет в наличии")}</p>`
+    : "";
+
+  const brandHtml = brand
+    ? `<p class="product-detail-brand">Бренд: <a href="/brand/${product.brand_id}">${escapeHtml(brand)}</a></p>`
+    : "";
+
+  const skuText = String(product.sku || "").trim();
+
+  const isFavorite = getFavorites(req).includes(id);
+
+  let descriptionHtml = "";
+
+  if (String(product.description || "").trim()) {
+    descriptionHtml = `
+      <section class="product-section">
+        <h2 class="product-section-title">Описание</h2>
+        <div class="product-description">${escapeHtml(product.description)}</div>
+      </section>
+    `;
+  }
+
+  const productHeroHtml = `
+    <section
+      class="page-hero-band page-hero-band--photo product-hero"
+      style="background-image: linear-gradient(rgba(31, 68, 104, 0.78), rgba(31, 68, 104, 0.78)), url('/uploads/catalog-hero.jpg')"
+    >
+      <div class="page-hero-band-inner">
+        <h1 class="page-hero-band-title">${escapeHtml(product.name)}</h1>
+      </div>
+    </section>
+  `;
 
   return sendHtml(
     res,
@@ -5908,161 +7085,240 @@ if (
       req,
       product.name,
       `
-        <h1>
-          ${escapeHtml(product.name)}
-        </h1>
+        ${productHeroHtml}
 
-        <p>Бренд: ${escapeHtml(brand || "—")}</p>
+        <div class="product-detail">
+          <div class="product-detail-media-col">
+            ${mediaHtml}
+          </div>
 
-        ${
-          product.image
-            ? `
-              <p>
-                <img
-                  src="${escapeHtml(product.image)}"
-                  alt="${escapeHtml(product.name)}"
-                  class="product-main-image"
-                  style="max-width:600px;width:100%;height:auto;"
-                >
-              </p>
-            `
-            : ""
-        }
+          <div class="product-detail-info">
+            ${brandHtml}
 
-        ${galleryHtml}
+            <p class="product-detail-name">${escapeHtml(product.name)}</p>
 
-        ${videoHtml}
+            ${skuText ? `<p class="product-detail-sku">Артикул: ${escapeHtml(skuText)}</p>` : ""}
 
-        ${documentHtml}
+            ${badges ? `<div class="product-detail-badges">${badges}</div>` : ""}
 
-        <p class="product-price">
-          <strong>
+            ${stockHtml}
+
+            ${priceHtml}
+
+            <div class="product-detail-actions">
+              <a class="product-cta product-cta--primary product-detail-action-cart" href="/cart/add/${id}" data-cart-add data-product-id="${id}">
+                В корзину
+              </a>
+              <a class="product-cta product-cta--secondary" href="/buy-one-click?product_id=${id}">
+                Купить в 1 клик
+              </a>
+              <a class="product-cta product-cta--secondary product-detail-action-favorite" href="/favorites/toggle/${id}" data-fav-toggle data-product-id="${id}" aria-pressed="${isFavorite}">
+                ${isFavorite ? "Убрать из избранного" : "В избранное"}
+              </a>
+            </div>
+
             ${
-  product.price_on_request
-    ? "Цена по запросу"
-    : Number(product.discount_percent) > 0
-      ? `<s>${product.price} ${product.currency}</s>
-         → ${product.price * (1 - product.discount_percent / 100)}
-         ${product.currency} / ${product.unit}
-         (−${product.discount_percent}%)`
-      : `${product.price} ${product.currency} / ${product.unit}`
-}
-          </strong>
-        </p>
+              names.length
+                ? `<p class="product-detail-categories">Категории: ${escapeHtml(names.join(", "))}</p>`
+                : ""
+            }
 
-        <p>
-          Наличие:
-          ${
-            product.availability === "in_stock"
-              ? "В наличии"
-              : product.availability === "on_order"
-                ? "Под заказ"
-                : "Нет в наличии"
-          }
-        </p>
+            ${
+              isAdmin(req)
+                ? `<p class="product-detail-admin"><a href="/edit-product/${id}">Редактировать товар</a></p>`
+                : ""
+            }
+          </div>
+        </div>
 
-                <p>
-          ${
-            Number(product.discount_percent) > 0
-              ? "Акция "
-              : ""
-          }
-          ${
-            product.is_new
-              ? "Новинка "
-              : ""
-          }
-          ${
-            product.is_hit
-              ? "Хит"
-              : ""
-          }
-        </p>
-
-        <p>
-          ${escapeHtml(product.description || "")}
-        </p>
+        ${descriptionHtml}
 
         ${characteristicsHtml}
 
-        <p>
-          Категории:
-          ${escapeHtml(names.join(", ") || "—")}
-        </p>
+        ${documentHtml}
 
-        <p class="product-actions">
-  <a href="/buy-one-click?product_id=${id}">
-    Купить в 1 клик
-  </a>
-</p>
-
-        <p class="product-actions">
-          <a href="/cart/add/${id}">
-            В корзину
-          </a>
-
-          |
-          <a href="/favorites/toggle/${id}">
-            ${getFavorites(req).includes(id) ? "Убрать из избранного" : "В избранное"}
-          </a>
-        </p>
+        ${videoHtml}
 
         ${recommendationHtml}
 
-        ${
-          isAdmin(req)
-            ? `
-              <p>
-                <a href="/edit-product/${id}">
-                  Редактировать товар
-                </a>
-              </p>
-            `
-            : ""
-        }
-
-
         <script>
           (() => {
-            const images = document.querySelectorAll(
-              ".product-main-image, .product-gallery-image"
-            );
+            const mainImage = document.getElementById("product-detail-main-image");
+            const mediaFrame = document.getElementById("product-media-frame");
+            const thumbs = Array.from(document.querySelectorAll(".product-detail-thumb"));
 
-            images.forEach(image => {
-              image.addEventListener("click", event => {
-                event.preventDefault();
-                const overlay = document.createElement("div");
-                overlay.className = "product-image-zoom";
-                const closeButton = document.createElement("button");
-                closeButton.type = "button";
-                closeButton.setAttribute("aria-label", "Закрыть изображение");
-                closeButton.textContent = "Закрыть";
-                const zoomedImage = document.createElement("img");
-                zoomedImage.src = image.currentSrc || image.src;
-                zoomedImage.alt = image.alt;
-                overlay.append(closeButton, zoomedImage);
-                document.body.append(overlay);
+            const setActiveThumb = image => {
+              thumbs.forEach(thumb => {
+                const isActive = thumb.dataset.image === image;
+                thumb.classList.toggle("is-active", isActive);
+                if (isActive) {
+                  thumb.setAttribute("aria-current", "true");
+                } else {
+                  thumb.removeAttribute("aria-current");
+                }
+              });
+            };
 
-                const close = () => {
-                  overlay.remove();
-                  document.removeEventListener("keydown", onKeyDown);
-                };
-                const onKeyDown = event => {
-                  if (event.key === "Escape") {
-                    close();
-                  }
-                };
-                overlay.addEventListener("click", event => {
-                  if (event.target === overlay || event.target === closeButton) {
-                    close();
-                  }
-                });
-                document.addEventListener("keydown", onKeyDown);
+            thumbs.forEach(thumb => {
+              thumb.addEventListener("click", () => {
+                if (!mainImage) {
+                  return;
+                }
+                mainImage.src = thumb.dataset.image;
+                setActiveThumb(thumb.dataset.image);
               });
             });
+
+            const openZoom = (src, alt) => {
+              const overlay = document.createElement("div");
+              overlay.className = "product-image-zoom";
+              const closeButton = document.createElement("button");
+              closeButton.type = "button";
+              closeButton.setAttribute("aria-label", "Закрыть изображение");
+              closeButton.textContent = "Закрыть";
+              const zoomedImage = document.createElement("img");
+              zoomedImage.src = src;
+              zoomedImage.alt = alt;
+              zoomedImage.draggable = false;
+              overlay.append(closeButton, zoomedImage);
+              document.body.append(overlay);
+              document.body.style.overflow = "hidden";
+
+              let scale = 1;
+              let offsetX = 0;
+              let offsetY = 0;
+              let moved = false;
+              const pointers = new Map();
+              let pinchStartDistance = 0;
+              let pinchStartScale = 1;
+              let lastTapTime = 0;
+
+              const applyTransform = () => {
+                zoomedImage.style.transform =
+                  "translate(" + offsetX + "px, " + offsetY + "px) scale(" + scale + ")";
+              };
+
+              const close = () => {
+                overlay.remove();
+                document.body.style.overflow = "";
+                document.removeEventListener("keydown", onKeyDown);
+              };
+
+              const onKeyDown = event => {
+                if (event.key === "Escape") {
+                  close();
+                }
+              };
+
+              document.addEventListener("keydown", onKeyDown);
+
+              overlay.addEventListener("click", event => {
+                if (!moved && (event.target === overlay || event.target === closeButton)) {
+                  close();
+                }
+              });
+
+              zoomedImage.addEventListener("wheel", event => {
+                event.preventDefault();
+                const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+                scale = Math.min(6, Math.max(1, scale * factor));
+                applyTransform();
+              }, { passive: false });
+
+              const pointerDistance = (first, second) =>
+                Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
+
+              overlay.addEventListener("pointerdown", event => {
+                if (event.target === closeButton) {
+                  return;
+                }
+                pointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+                if (pointers.size === 2) {
+                  const pair = Array.from(pointers.values());
+                  pinchStartDistance = pointerDistance(pair[0], pair[1]);
+                  pinchStartScale = scale;
+                }
+                moved = false;
+              });
+
+              overlay.addEventListener("pointermove", event => {
+                if (!pointers.has(event.pointerId)) {
+                  return;
+                }
+                const previous = pointers.get(event.pointerId);
+                pointers.set(event.pointerId, { clientX: event.clientX, clientY: event.clientY });
+
+                if (pointers.size === 1 && scale > 1) {
+                  offsetX += event.clientX - previous.clientX;
+                  offsetY += event.clientY - previous.clientY;
+                  moved = true;
+                  applyTransform();
+                } else if (pointers.size === 2) {
+                  const pair = Array.from(pointers.values());
+                  const currentDistance = pointerDistance(pair[0], pair[1]);
+                  if (pinchStartDistance > 0) {
+                    scale = Math.min(
+                      6,
+                      Math.max(1, pinchStartScale * currentDistance / pinchStartDistance)
+                    );
+                    if (Math.abs(currentDistance - pinchStartDistance) > 4) {
+                      moved = true;
+                    }
+                    applyTransform();
+                  }
+                }
+              });
+
+              const releasePointer = event => {
+                pointers.delete(event.pointerId);
+                if (pointers.size < 2) {
+                  pinchStartDistance = 0;
+                }
+              };
+
+              overlay.addEventListener("pointerup", releasePointer);
+              overlay.addEventListener("pointercancel", releasePointer);
+
+              zoomedImage.addEventListener("pointerup", () => {
+                if (moved || pointers.size > 0) {
+                  return;
+                }
+                const now = Date.now();
+                if (now - lastTapTime < 300) {
+                  scale = scale > 1 ? 1 : 2.5;
+                  offsetX = 0;
+                  offsetY = 0;
+                  applyTransform();
+                  lastTapTime = 0;
+                } else {
+                  lastTapTime = now;
+                }
+              });
+            };
+
+            if (mainImage) {
+              mainImage.addEventListener("click", () => {
+                openZoom(mainImage.currentSrc || mainImage.src, mainImage.alt);
+              });
+            }
+
+            if (
+              window.matchMedia("(hover: hover) and (pointer: fine)").matches &&
+              mainImage &&
+              mediaFrame
+            ) {
+              mediaFrame.classList.add("product-detail-media-frame--zoomable");
+              mediaFrame.addEventListener("mousemove", event => {
+                const rect = mediaFrame.getBoundingClientRect();
+                const x = ((event.clientX - rect.left) / rect.width) * 100;
+                const y = ((event.clientY - rect.top) / rect.height) * 100;
+                mainImage.style.transformOrigin = x + "% " + y + "%";
+              });
+            }
           })();
         </script>
-      `
+      `,
+      { theme: false }
     )
   );
 }
@@ -6078,6 +7334,17 @@ if (
 
            const params =
              await readBody(req);
+
+           const rateLimit =
+             enforceRateLimit(req, "/buy-one-click");
+
+           if (!rateLimit.allowed) {
+             return sendRateLimitedPage(res, req, rateLimit.retryAfter);
+           }
+
+           if (isHoneypotFilled(params)) {
+             return sendHoneypotDecoy(res, req, "/buy-one-click");
+           }
 
            const oneClickToken =
              params.get("one_click_token") || "";
@@ -6406,9 +7673,16 @@ return redirect(
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path.startsWith("/favorites/toggle/")
         ) {
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
+
           const id =
             Number(
               path.split("/")[3]
@@ -6445,6 +7719,18 @@ return redirect(
           }
 
           setFavorites(res, favorites);
+
+          // AJAX-клиент получает данные для обновления UI без перезагрузки.
+          if (req.headers["x-requested-with"] === "XMLHttpRequest") {
+            res.writeHead(200, {
+              "Content-Type": "application/json; charset=utf-8"
+            });
+            return res.end(JSON.stringify({
+              ok: true,
+              favorite: favorites.includes(id),
+              count: favorites.length
+            }));
+          }
 
           const referer = req.headers.referer || "";
           const refererUrl = new URL(
@@ -6488,14 +7774,19 @@ return redirect(
                     Корзина
                   </h1>
 
-                  <p>
-                    Корзина пуста.
-                  </p>
+                  <div class="cart-empty">
+                    <h2>Корзина пуста</h2>
+                    <p>Выберите товары в каталоге — и они появятся здесь.</p>
+                    <a class="cart-empty-cta" href="/catalog">Перейти в каталог</a>
+                  </div>
                 `
               )
             );
           }
 
+
+          const currency =
+            items[0].currency || "BYN";
 
           const total =
             items.reduce(
@@ -6504,9 +7795,26 @@ return redirect(
               0
             );
 
+          const totalText =
+            Number.isInteger(total)
+              ? String(total)
+              : total.toFixed(2);
 
-          let itemsHtml =
-            "<ul>";
+          const totalQuantity = items.reduce(
+            (sum, item) =>
+              sum + item.quantity,
+            0
+          );
+
+          const hasPriceOnRequest =
+            items.some(item => item.price_on_request);
+
+          const formatSum = value =>
+            Number.isInteger(value)
+              ? String(value)
+              : value.toFixed(2);
+
+          let itemsHtml = "";
 
 
           for (
@@ -6514,42 +7822,71 @@ return redirect(
             of items
           ) {
 
+            const discountPercent =
+              Number(item.discount_percent) || 0;
+
+            const hasDiscount =
+              discountPercent > 0 &&
+              !item.price_on_request;
+
+            const unitPrice = hasDiscount
+              ? item.price * (1 - discountPercent / 100)
+              : item.price;
+
+            const unitPriceText =
+              formatSum(unitPrice);
+
+            const skuText =
+              String(item.sku || "").trim();
+
             itemsHtml += `
-              <li>
+              <li class="cart-item">
 
-                ${escapeHtml(
-                  item.name
-                )}
-
-                —
-            ${
-  item.price_on_request
-    ? "Цена по запросу"
-    : Number(item.discount_percent) > 0
-      ? `<s>${item.price} ${item.currency}</s> → ${item.price * (1 - item.discount_percent / 100)} ${item.currency}`
-      : `${item.price} ${item.currency}`
-}
-
-                ×
-                ${item.quantity}
-
-                =
-                ${item.sum}
-                ${item.currency}
-
-                <a
-                  href="/cart/remove/${item.id}"
-                >
-                  Убрать
+                <a class="cart-item-media" href="/product/${item.id}">
+                  ${
+                    item.image
+                      ? `<img src="${escapeHtml(item.image)}" alt="${escapeHtml(item.name)}" loading="lazy">`
+                      : `<span class="cart-item-media-placeholder" aria-hidden="true">Нет фото</span>`
+                  }
                 </a>
+
+                <div class="cart-item-info">
+                  <a class="cart-item-name" href="/product/${item.id}">${escapeHtml(item.name)}</a>
+
+                  ${skuText ? `<p class="cart-item-sku">Артикул: ${escapeHtml(skuText)}</p>` : ""}
+
+                  ${
+                    item.price_on_request
+                      ? `<p class="cart-item-price"><span>Цена по запросу</span></p>`
+                      : `
+                        <p class="cart-item-price">
+                          ${hasDiscount ? `<s>${escapeHtml(item.price)} ${escapeHtml(item.currency)}</s>` : ""}
+                          <span>${unitPriceText} ${escapeHtml(item.currency)}${item.unit ? ` / ${escapeHtml(item.unit)}` : ""}</span>
+                          ${hasDiscount ? `<span class="cart-item-discount">−${discountPercent}%</span>` : ""}
+                        </p>
+                      `
+                  }
+                </div>
+
+                <div class="cart-item-qty">
+                  <a class="cart-qty-btn" href="/cart/decrease/${item.id}" data-cart-decrease data-product-id="${item.id}" aria-label="Уменьшить количество">−</a>
+                  <span class="cart-qty-value">${item.quantity}</span>
+                  <a class="cart-qty-btn" href="/cart/add/${item.id}" data-cart-add data-product-id="${item.id}" aria-label="Увеличить количество">+</a>
+                </div>
+
+                <p class="cart-item-sum">
+                  ${
+                    item.price_on_request
+                      ? `<span class="cart-item-sum-label">Сумма</span><span class="cart-item-sum-value">Цена по запросу</span>`
+                      : `<span class="cart-item-sum-label">Сумма</span><span class="cart-item-sum-value">${formatSum(item.sum)} ${escapeHtml(item.currency)}</span>`
+                  }
+                </p>
+
+                <a class="cart-item-remove" href="/cart/remove/${item.id}" data-cart-remove data-product-id="${item.id}">Удалить</a>
 
               </li>
             `;
           }
-
-
-          itemsHtml +=
-            "</ul>";
 
 
           return sendHtml(
@@ -6562,33 +7899,38 @@ return redirect(
                   Корзина
                 </h1>
 
-                ${itemsHtml}
+                <ul class="cart-items">
+                  ${itemsHtml}
+                </ul>
 
-                <p>
-                  <strong>
-                    Итого:
-                  ${total}
-                  ${items[0].currency}
-                  </strong>
-                </p>
+                <section class="cart-summary">
+                  <div class="cart-summary-info">
+                    <p class="cart-summary-count">
+                      Позиций: ${items.length} · Товаров: ${totalQuantity} шт.
+                    </p>
 
-                <p>
+                    ${
+                      hasPriceOnRequest
+                        ? `<p class="cart-summary-note">В корзине есть товары с ценой по запросу — их стоимость уточнит менеджер при оформлении.</p>`
+                        : ""
+                    }
 
-                  <a href="/checkout">
-                    Оформить заказ
-                  </a>
+                    <p class="cart-summary-total">
+                      Итого:
+                      <span class="cart-summary-total-value">${totalText} ${escapeHtml(currency)}</span>
+                    </p>
+                  </div>
 
-                  |
-
-                  <a href="/cart/clear">
-                    Очистить корзину
-                  </a>
-
-                </p>
+                  <div class="cart-summary-actions">
+                    <a class="cart-checkout" href="/checkout">Оформить заказ</a>
+                    <a class="cart-clear" href="/cart/clear" data-cart-clear>Очистить корзину</a>
+                  </div>
+                </section>
               `
             )
           );
         }
+
 
 
         // ==================================================
@@ -6596,11 +7938,18 @@ return redirect(
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path.startsWith(
             "/cart/add/"
           )
         ) {
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
 
           const id =
             Number(
@@ -6678,18 +8027,37 @@ return redirect(
             getCart(req);
 
 
+          // Прибавляем с учётом максимума, чтобы позиция не выпадала
+          // из корзины при последующей нормализации.
           currentCart[id] =
-            (
-              Number(
-                currentCart[id]
-              ) || 0
-            ) + 1;
+            Math.min(
+              MAX_CART_QUANTITY,
+              Math.max(
+                0,
+                Number(currentCart[id]) || 0
+              ) + 1
+            );
 
 
           setCart(
             res,
             currentCart
           );
+
+
+          // AJAX-клиент получает общее количество единиц для badge корзины.
+          if (req.headers["x-requested-with"] === "XMLHttpRequest") {
+            res.writeHead(200, {
+              "Content-Type": "application/json; charset=utf-8"
+            });
+            return res.end(JSON.stringify({
+              ok: true,
+              count: Object.values(normalizeCart(currentCart)).reduce(
+                (sum, quantity) => sum + quantity,
+                0
+              )
+            }));
+          }
 
 
           return redirect(
@@ -6700,15 +8068,23 @@ return redirect(
 
 
         // ==================================================
-        // УДАЛИТЬ ИЗ КОРЗИНЫ
+        // УДАЛИТЬ ИЗ КОРЗИНЫ (POST + CSRF, как /cart/add и /cart/clear;
+        // GET больше не мутирует корзину)
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path.startsWith(
             "/cart/remove/"
           )
         ) {
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
 
           const id =
             Number(
@@ -6729,6 +8105,103 @@ return redirect(
           );
 
 
+          // AJAX-клиент получает подтверждение и общее количество единиц
+          // для badge корзины; страница корзины перезагружается сама.
+          if (req.headers["x-requested-with"] === "XMLHttpRequest") {
+            res.writeHead(200, {
+              "Content-Type": "application/json; charset=utf-8"
+            });
+            return res.end(JSON.stringify({
+              ok: true,
+              count: Object.values(currentCart).reduce(
+                (sum, quantity) => sum + quantity,
+                0
+              )
+            }));
+          }
+
+
+          return redirect(
+            res,
+            "/cart"
+          );
+        }
+
+
+        // ==================================================
+        // УМЕНЬШИТЬ КОЛИЧЕСТВО В КОРЗИНЕ
+        // ==================================================
+
+        if (
+          req.method === "POST" &&
+          path.startsWith(
+            "/cart/decrease/"
+          )
+        ) {
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
+
+          const id =
+            Number(
+              path.split("/")[3]
+            );
+
+
+          const currentCart =
+            getCart(req);
+
+
+          if (
+            Object.prototype.hasOwnProperty.call(
+              currentCart,
+              id
+            )
+          ) {
+
+            const quantity =
+              Number(
+                currentCart[id]
+              ) || 1;
+
+
+            if (
+              quantity <= 1
+            ) {
+              delete currentCart[id];
+            } else {
+              currentCart[id] =
+                quantity - 1;
+            }
+
+
+            setCart(
+              res,
+              currentCart
+            );
+          }
+
+
+          // AJAX-клиент получает подтверждение и общее количество единиц
+          // для badge корзины; страница корзины перезагружается сама.
+          if (req.headers["x-requested-with"] === "XMLHttpRequest") {
+            res.writeHead(200, {
+              "Content-Type": "application/json; charset=utf-8"
+            });
+            return res.end(JSON.stringify({
+              ok: true,
+              count: Object.values(currentCart).reduce(
+                (sum, quantity) => sum + quantity,
+                0
+              )
+            }));
+          }
+
+
           return redirect(
             res,
             "/cart"
@@ -6741,9 +8214,16 @@ return redirect(
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path === "/cart/clear"
         ) {
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
 
           setCart(
             res,
@@ -6751,10 +8231,167 @@ return redirect(
           );
 
 
+          // AJAX-клиент получает подтверждение; страница корзины
+          // перезагружается и показывает пустое состояние.
+          if (req.headers["x-requested-with"] === "XMLHttpRequest") {
+            res.writeHead(200, {
+              "Content-Type": "application/json; charset=utf-8"
+            });
+            return res.end(JSON.stringify({
+              ok: true,
+              count: 0
+            }));
+          }
+
+
           return redirect(
             res,
             "/cart"
           );
+        }
+
+
+        // ==================================================
+        // КОНТАКТЫ — ПУБЛИЧНАЯ СТРАНИЦА
+        // ==================================================
+
+        if (
+          req.method === "GET" &&
+          path === "/contacts"
+        ) {
+          const contacts = getContactSettings();
+
+          const phoneNumbers = [
+            contacts.contact_phone,
+            contacts.contact_phone_2
+          ].filter(Boolean);
+
+          const phoneHref = phone =>
+            escapeHtml(String(phone).replace(/[^+0-9]/g, ""));
+
+          const phoneItems = phoneNumbers
+            .map(phone => `
+              <li>
+                <a class="contact-phone-link" href="tel:${phoneHref(phone)}">${escapeHtml(phone)}</a>
+              </li>`
+            )
+            .join("");
+
+          const hoursItems = String(contacts.contact_working_hours || "")
+            .split(",")
+            .map(item => item.trim())
+            .filter(Boolean);
+
+          const messengerLinks = [
+            { key: "contact_telegram", label: "Telegram" },
+            { key: "contact_whatsapp", label: "WhatsApp" },
+            { key: "contact_viber", label: "Viber" },
+            { key: "contact_vk", label: "VK" },
+            { key: "contact_instagram", label: "Instagram" },
+            { key: "contact_facebook", label: "Facebook" }
+          ].filter(messenger => contacts[messenger.key]);
+
+          const hasContactInfo =
+            phoneNumbers.length > 0 ||
+            contacts.contact_email ||
+            contacts.contact_address ||
+            hoursItems.length > 0 ||
+            messengerLinks.length > 0;
+
+          return sendHtml(
+            res,
+            renderPage(
+              req,
+              "Контакты",
+              `
+                <h1>Контакты</h1>
+
+                ${
+                  hasContactInfo
+                    ? `
+                      <div class="contacts-layout">
+                        <div class="contacts-main">
+                          ${
+                            phoneItems
+                              ? `
+                                <section class="contact-card">
+                                  <h2 class="contact-card-title">
+                                    <svg class="contact-card-icon" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3.6 1.3 5 .9c.4-.1.8.1 1 .5l1.1 2.6c.2.4.1.8-.2 1.1L5.8 6.2a10.5 10.5 0 0 0 4 4l1.1-1.1c.3-.3.7-.4 1.1-.2l2.6 1.1c.4.2.6.6.5 1l-.4 1.4c-.1.5-.6.9-1.1.9A13.3 13.3 0 0 1 2.7 2.4c0-.5.4-1 .9-1.1z"/></svg>
+                                    Телефоны
+                                  </h2>
+                                  <ul class="contact-phone-list">${phoneItems}</ul>
+                                </section>`
+                              : ""
+                          }
+
+                          ${
+                            contacts.contact_email
+                              ? `
+                                <section class="contact-card">
+                                  <h2 class="contact-card-title">
+                                    <svg class="contact-card-icon" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M1.5 3h13c.3 0 .5.2.5.5v.2L8 8.4 1 3.7v-.2c0-.3.2-.5.5-.5zM1 5l7 4.7L15 5v7.5c0 .3-.2.5-.5.5h-13a.5.5 0 0 1-.5-.5V5z"/></svg>
+                                    Email
+                                  </h2>
+                                  <a class="contact-email-link" href="mailto:${escapeHtml(contacts.contact_email)}">${escapeHtml(contacts.contact_email)}</a>
+                                </section>`
+                              : ""
+                          }
+
+                          ${
+                            messengerLinks.length
+                              ? `
+                                <section class="contact-card">
+                                  <h2 class="contact-card-title">Мессенджеры и соцсети</h2>
+                                  <ul class="contact-messenger-list">${messengerLinks.map(messenger => `
+                                    <li><a href="${escapeHtml(contacts[messenger.key])}" target="_blank" rel="noopener">${messenger.label}</a></li>`).join("")}</ul>
+                                </section>`
+                              : ""
+                          }
+                        </div>
+
+                        <aside class="contacts-side">
+                          ${
+                            contacts.contact_address
+                              ? `
+                                <section class="contact-card">
+                                  <h2 class="contact-card-title">
+                                    <svg class="contact-card-icon" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 1a5 5 0 0 1 5 5c0 2.6-2.1 5.4-4.4 8.2a.8.8 0 0 1-1.2 0C5.1 11.4 3 8.6 3 6a5 5 0 0 1 5-5zm0 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+                                    Адрес
+                                  </h2>
+                                  <p class="contact-card-text">${escapeHtml(contacts.contact_address)}</p>
+                                </section>`
+                              : ""
+                          }
+
+                          ${
+                            hoursItems.length
+                              ? `
+                                <section class="contact-card">
+                                  <h2 class="contact-card-title">
+                                    <svg class="contact-card-icon" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 1a7 7 0 1 1 0 14A7 7 0 0 1 8 1zm0 1.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11zM8 4a.75.75 0 0 1 .75.75V8l2.2 1.3a.75.75 0 1 1-.76 1.29l-2.57-1.54A.75.75 0 0 1 7.25 8V4.75A.75.75 0 0 1 8 4z"/></svg>
+                                    Режим работы
+                                  </h2>
+                                  <ul class="contact-hours-list">${hoursItems.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+                                </section>`
+                              : ""
+                          }
+                        </aside>
+                      </div>
+
+                      <section class="contact-cta-card">
+                        <div class="contact-cta-text">
+                          <h2>Как с нами связаться</h2>
+                          <p>Оставьте заявку или свяжитесь с нами удобным способом.</p>
+                        </div>
+                        <a class="contact-cta" href="/callback-request">Заказать обратный звонок</a>
+                      </section>
+                    `
+                    : "<p>Контактные данные пока не заполнены.</p>"
+                }
+              `
+            )
+          );
+
         }
 
 
@@ -6788,6 +8425,17 @@ return redirect(
 
            const params =
              await readBody(req);
+
+           const rateLimit =
+             enforceRateLimit(req, "/callback-request");
+
+           if (!rateLimit.allowed) {
+             return sendRateLimitedPage(res, req, rateLimit.retryAfter);
+           }
+
+           if (isHoneypotFilled(params)) {
+             return sendHoneypotDecoy(res, req, "/callback-request");
+           }
 
            const name =
              params.get("name")
@@ -6971,11 +8619,24 @@ return redirect(
            const contentType =
              req.headers["content-type"] || "";
 
+           // Rate limit ДО парсинга тела: анонимный multipart-запрос
+           // не должен буферизоваться в памяти до проверки лимита.
+           const repairRateLimit =
+             enforceRateLimit(req, "/repair-request");
+
+           if (!repairRateLimit.allowed) {
+             return sendRateLimitedPage(res, req, repairRateLimit.retryAfter);
+           }
+
             const params =
               await parseMultipartBody(
                 req,
                 contentType
-              );
+              , MULTIPART_LIMITS.publicPhotos);
+
+            if (isHoneypotFilled(params)) {
+              return sendHoneypotDecoy(res, req, "/repair-request");
+            }
 
            const name =
              params.get("name")
@@ -7372,11 +9033,24 @@ return redirect(
            const contentType =
              req.headers["content-type"] || "";
 
+           // Rate limit ДО парсинга тела: анонимный multipart-запрос
+           // не должен буферизоваться в памяти до проверки лимита.
+           const serviceRateLimit =
+             enforceRateLimit(req, "/service-request");
+
+           if (!serviceRateLimit.allowed) {
+             return sendRateLimitedPage(res, req, serviceRateLimit.retryAfter);
+           }
+
             const params =
               await parseMultipartBody(
                 req,
                 contentType
-              );
+              , MULTIPART_LIMITS.publicPhotos);
+
+            if (isHoneypotFilled(params)) {
+              return sendHoneypotDecoy(res, req, "/service-request");
+            }
 
            const name =
              params.get("name")
@@ -7910,6 +9584,7 @@ return redirect(
                      name="checkout_token"
                      value="${escapeHtml(checkoutToken)}"
                    >
+                   ${HONEYPOT_FIELD}
 
 
                   <p>
@@ -8220,6 +9895,17 @@ if (isValidPhone(phone)) {
 
           const params =
             await readBody(req);
+
+          const rateLimit =
+            enforceRateLimit(req, "/checkout");
+
+          if (!rateLimit.allowed) {
+            return sendRateLimitedPage(res, req, rateLimit.retryAfter);
+          }
+
+          if (isHoneypotFilled(params)) {
+            return sendHoneypotDecoy(res, req, "/checkout");
+          }
 
           const checkoutToken =
             params.get("checkout_token") || "";
@@ -9136,6 +10822,7 @@ if (isValidPhone(phone)) {
                     method="POST"
                     action="/orders/${orderId}/status"
                   >
+                  ${renderCsrfField()}
                     <p>
                       <label>
                         Изменить статус:
@@ -9215,6 +10902,10 @@ ${
 
           const params =
             await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
 
           const status =
             params.get("status")?.trim() || "";
@@ -9299,7 +10990,7 @@ ${
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path.startsWith(
             "/orders/delete/"
           )
@@ -9313,6 +11004,15 @@ ${
           ) {
             return;
           }
+
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
+
 
 
           const orderId =
@@ -9507,6 +11207,7 @@ for (
                   action="/add-product"
                   enctype="multipart/form-data"
                 >
+                ${renderCsrfField()}
 
                   <p>
   Название:
@@ -9840,7 +11541,11 @@ const params =
   await parseMultipartBody(
     req,
     contentType
-  );
+  , MULTIPART_LIMITS.adminProducts);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
 
 
           const name =
@@ -10437,6 +12142,7 @@ const valuesByCharacteristicId =
                     action="/product-images/delete/${id}"
                     style="margin:0;"
                   >
+                  ${renderCsrfField()}
                     <input
                       type="hidden"
                       name="image"
@@ -10527,6 +12233,7 @@ const valuesByCharacteristicId =
                     action="/product-videos/delete/${id}"
                     style="margin:0;"
                   >
+                  ${renderCsrfField()}
                     <input
                       type="hidden"
                       name="video"
@@ -10631,6 +12338,7 @@ const valuesByCharacteristicId =
                     action="/product-documents/delete/${id}"
                     style="display:inline; margin:0;"
                   >
+                  ${renderCsrfField()}
                     <input
                       type="hidden"
                       name="document"
@@ -10743,6 +12451,7 @@ const discountValue =
   action="/edit-product/${id}"
   enctype="multipart/form-data"
 >
+${renderCsrfField()}
 
                   <p>
                     Название:
@@ -11254,7 +12963,11 @@ if (
   const id = Number(path.split("/")[2]);
 
   const contentType = req.headers["content-type"] || "";
-  const params = await parseMultipartBody(req, contentType);
+  const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminProducts);
+
+  if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+    return sendCsrfForbidden(res, req);
+  }
 
   const existingProduct =
     db.prepare(`
@@ -11645,6 +13358,10 @@ await saveUploadedImage(
           const params =
             await readBody(req);
 
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
+
           const image =
             params.get("image") || "";
 
@@ -11678,7 +13395,7 @@ await saveUploadedImage(
           if (image.startsWith("/uploads/")) {
             const uploadPath =
               pathModule.join(
-                process.cwd(),
+                __dirname,
                 "uploads",
                 pathModule.basename(image)
               );
@@ -11727,6 +13444,10 @@ await saveUploadedImage(
           const params =
             await readBody(req);
 
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
+
           const video =
             params.get("video") || "";
 
@@ -11760,7 +13481,7 @@ await saveUploadedImage(
           if (video.startsWith("/uploads/")) {
             const uploadPath =
               pathModule.join(
-                process.cwd(),
+                __dirname,
                 "uploads",
                 pathModule.basename(video)
               );
@@ -11809,6 +13530,10 @@ await saveUploadedImage(
           const params =
             await readBody(req);
 
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
+
           const document =
             params.get("document") || "";
 
@@ -11847,7 +13572,7 @@ await saveUploadedImage(
           if (document.startsWith("/uploads/")) {
             const uploadPath =
               pathModule.join(
-                process.cwd(),
+                __dirname,
                 "uploads",
                 pathModule.basename(document)
               );
@@ -11876,7 +13601,7 @@ await saveUploadedImage(
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path.startsWith(
             "/delete-product/"
           )
@@ -11889,6 +13614,13 @@ await saveUploadedImage(
             )
           ) {
             return;
+          }
+
+          const deleteParams =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, deleteParams))) {
+            return sendCsrfForbidden(res, req);
           }
 
 
@@ -11973,6 +13705,7 @@ if (
                       action="/admin/deleted-products/restore/${product.id}"
                       style="display:inline"
                     >
+                    ${renderCsrfField()}
                       <button type="submit">
                         Восстановить
                       </button>
@@ -12009,6 +13742,11 @@ if (
     return;
   }
 
+  const params = await readBody(req);
+
+  if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+    return sendCsrfForbidden(res, req);
+  }
   const id =
     Number(
       path.split("/")[4]
@@ -12070,6 +13808,7 @@ if (
                           <li>
                             <strong>${escapeHtml(service.name)}</strong>
                             <form method="POST" action="/admin/deleted-materials/restore/${service.id}" style="display:inline">
+                            ${renderCsrfField()}
                               <button type="submit">Восстановить</button>
                             </form>
                           </li>
@@ -12087,6 +13826,7 @@ if (
                           <li>
                             <strong>${escapeHtml(item.title)}</strong>
                             <form method="POST" action="/admin/deleted-materials/restore-news/${item.id}" style="display:inline">
+                            ${renderCsrfField()}
                               <button type="submit">Восстановить</button>
                             </form>
                           </li>
@@ -12113,6 +13853,11 @@ if (
             return;
           }
 
+          const params = await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const id = Number(path.split("/")[4]);
           db.prepare(`
             UPDATE services
@@ -12136,6 +13881,11 @@ if (
             return;
           }
 
+          const params = await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const id = Number(path.split("/")[4]);
           db.prepare(`
             UPDATE news
@@ -12181,6 +13931,7 @@ if (
                 <h2>Добавить услугу</h2>
 
                 <form method="POST" action="/admin/services" enctype="multipart/form-data">
+                ${renderCsrfField()}
                   <p>
                     Название:
                     <input type="text" name="name" required>
@@ -12369,7 +14120,11 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminMedia);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const name = params.get("name")?.trim() || "";
           const shortDescription = params.get("short_description")?.trim() || "";
           const description = params.get("description")?.trim() || "";
@@ -12474,6 +14229,7 @@ if (
                 <h1>Редактирование услуги</h1>
 
                 <form method="POST" action="/admin/services/edit/${id}" enctype="multipart/form-data">
+                ${renderCsrfField()}
                   <p>
                     Название:
                     <input type="text" name="name" value="${escapeHtml(service.name)}" required>
@@ -12663,7 +14419,11 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminMedia);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const name = params.get("name")?.trim() || "";
           const shortDescription = params.get("short_description")?.trim() || "";
           const description = params.get("description")?.trim() || "";
@@ -12753,11 +14513,18 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           /^\/admin\/services\/toggle\/\d+$/.test(path)
         ) {
           if (!requireAdmin(req, res)) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
           const id = Number(path.split("/")[4]);
@@ -12776,11 +14543,18 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           /^\/admin\/services\/delete\/\d+$/.test(path)
         ) {
           if (!requireAdmin(req, res)) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
           const id = Number(path.split("/")[4]);
@@ -12825,6 +14599,7 @@ if (
                 <h2>Добавить проект</h2>
 
                 <form method="POST" action="/admin/projects" enctype="multipart/form-data">
+                ${renderCsrfField()}
                   <p>
                     Название:
                     <input type="text" name="name" required>
@@ -12894,7 +14669,11 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminGallery);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const name = params.get("name")?.trim() || "";
           const description = params.get("description")?.trim() || "";
           const sortOrder = Number(params.get("sort_order") || 0);
@@ -12985,6 +14764,7 @@ if (
                 <h1>Редактирование проекта</h1>
 
                 <form method="POST" action="/admin/projects/edit/${id}" enctype="multipart/form-data">
+                ${renderCsrfField()}
                   <p>
                     Название:
                     <input type="text" name="name" value="${escapeHtml(project.name)}" required>
@@ -13040,7 +14820,11 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminGallery);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const name = params.get("name")?.trim() || "";
           const description = params.get("description")?.trim() || "";
           const sortOrder = Number(params.get("sort_order") || 0);
@@ -13113,11 +14897,18 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           /^\/admin\/projects\/toggle\/\d+$/.test(path)
         ) {
           if (!requireAdmin(req, res)) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
           const id = Number(path.split("/")[4]);
@@ -13136,11 +14927,18 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           /^\/admin\/projects\/delete\/\d+$/.test(path)
         ) {
           if (!requireAdmin(req, res)) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
           const id = Number(path.split("/")[4]);
@@ -13189,6 +14987,7 @@ if (
                 <h2>Добавить новость</h2>
 
                 <form method="POST" action="/admin/news" enctype="multipart/form-data">
+                ${renderCsrfField()}
                   <p>
                     Заголовок:
                     <input type="text" name="title" required>
@@ -13263,7 +15062,11 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminGallery);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const title = params.get("title")?.trim() || "";
           const shortText = params.get("short_text")?.trim() || "";
           const fullText = params.get("full_text")?.trim() || "";
@@ -13378,6 +15181,7 @@ if (
                 <h1>Редактирование новости</h1>
 
                 <form method="POST" action="/admin/news/edit/${id}" enctype="multipart/form-data">
+                ${renderCsrfField()}
                   <p>
                     Заголовок:
                     <input type="text" name="title" value="${escapeHtml(item.title)}" required>
@@ -13434,7 +15238,11 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminGallery);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const title = params.get("title")?.trim() || "";
           const shortText = params.get("short_text")?.trim() || "";
           const fullText = params.get("full_text")?.trim() || "";
@@ -13509,11 +15317,18 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           /^\/admin\/news\/toggle\/\d+$/.test(path)
         ) {
           if (!requireAdmin(req, res)) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
           const id = Number(path.split("/")[4]);
@@ -13532,11 +15347,18 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           /^\/admin\/news\/delete\/\d+$/.test(path)
         ) {
           if (!requireAdmin(req, res)) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
           const id = Number(path.split("/")[4]);
@@ -13580,6 +15402,7 @@ if (
                 <p><a href="/admin">← Назад в админ-панель</a></p>
 
                 <form method="POST" action="/admin/main-banner" enctype="multipart/form-data">
+                ${renderCsrfField()}
                   <p>
                     Заголовок:
                     <input
@@ -13661,7 +15484,11 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminBanner);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const title = params.get("title")?.trim() || "";
           const description = params.get("description")?.trim() || "";
           const buttonText = params.get("button_text")?.trim() || "";
@@ -13773,6 +15600,7 @@ if (
 
                 <h2>Создать страницу</h2>
                 <form method="POST" action="/admin/pages">
+                ${renderCsrfField()}
                   <p>
                     Название:
                     <input type="text" name="name" required>
@@ -13834,6 +15662,10 @@ if (
           }
 
           const params = await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const name = params.get("name")?.trim() || "";
           const slug = (params.get("slug")?.trim() || "").toLowerCase();
           const title = params.get("title")?.trim() || "";
@@ -13899,6 +15731,7 @@ if (
               `
                 <h1>Редактирование страницы</h1>
                 <form method="POST" action="/admin/pages/edit/${id}">
+                ${renderCsrfField()}
                   <p>Название: <input type="text" name="name" value="${escapeHtml(page.name)}" required></p>
                   <p>URL/slug: <input type="text" name="slug" value="${escapeHtml(page.slug)}" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*"></p>
                   <p>Заголовок: <input type="text" name="title" value="${escapeHtml(page.title)}" required></p>
@@ -13932,6 +15765,10 @@ if (
           }
 
           const params = await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
           const name = params.get("name")?.trim() || "";
           const slug = (params.get("slug")?.trim() || "").toLowerCase();
           const title = params.get("title")?.trim() || "";
@@ -13976,11 +15813,18 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           /^\/admin\/pages\/toggle\/\d+$/.test(path)
         ) {
           if (!requireAdmin(req, res)) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
           const id = Number(path.split("/")[4]);
@@ -13999,11 +15843,18 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           /^\/admin\/pages\/delete\/\d+$/.test(path)
         ) {
           if (!requireAdmin(req, res)) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
           const id = Number(path.split("/")[4]);
@@ -14059,6 +15910,7 @@ if (
                   method="POST"
                   action="/admin/categories"
                 >
+                ${renderCsrfField()}
 
                   <p>
                     Название:
@@ -14146,6 +15998,9 @@ if (
           const params =
             await readBody(req);
 
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
 
           const name =
             params.get("name")
@@ -14372,6 +16227,7 @@ if (
               method="POST"
               action="/admin/brands/edit/${brand.id}"
             >
+            ${renderCsrfField()}
 
               <p>
                 Название:
@@ -14415,6 +16271,10 @@ if (
 
       const params =
         await readBody(req);
+
+      if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+        return sendCsrfForbidden(res, req);
+      }
 
       const name =
         params.get("name")
@@ -14479,6 +16339,10 @@ if (
 
       const params =
         await readBody(req);
+
+      if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+        return sendCsrfForbidden(res, req);
+      }
 
       const name =
         params.get("name")
@@ -14559,6 +16423,10 @@ if (
         return;
       }
 
+      const params = await readBody(req);
+      if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+        return sendCsrfForbidden(res, req);
+      }
       const id =
         Number(
           path.split("/")[4]
@@ -14690,6 +16558,7 @@ if (
   method="POST"
   action="/admin/brands"
 >
+${renderCsrfField()}
   <p>
     Название:
 
@@ -14723,6 +16592,7 @@ if (
     action="/admin/brands/delete/${brand.id}"
     style="display:inline"
   >
+  ${renderCsrfField()}
     <button type="submit">
       Удалить
     </button>
@@ -14806,6 +16676,7 @@ if (
                   method="POST"
                   action="/admin/categories/edit/${id}"
                 >
+                ${renderCsrfField()}
 
                   <p>
                     Название:
@@ -14897,6 +16768,9 @@ if (
           const params =
             await readBody(req);
 
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
 
           const name =
             params.get("name")
@@ -15078,7 +16952,7 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path.startsWith(
             "/admin/categories/toggle/"
           )
@@ -15092,6 +16966,15 @@ if (
           ) {
             return;
           }
+
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
+          }
+
 
 
           const id =
@@ -15126,7 +17009,7 @@ if (
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path.startsWith(
             "/admin/categories/delete/"
           )
@@ -15139,6 +17022,13 @@ if (
             )
           ) {
             return;
+          }
+
+          const params =
+            await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
+            return sendCsrfForbidden(res, req);
           }
 
 
@@ -15315,6 +17205,26 @@ if (
         if (
           !res.headersSent
         ) {
+
+          if (error && error.statusCode === 413) {
+            sendHtml(
+              res,
+              renderPage(
+                req,
+                "Файл слишком большой",
+                `
+                  <h1>413 — Файл слишком большой</h1>
+
+                  <p>
+                    Загруженные данные превышают допустимый размер.
+                    Уменьшите количество или размер файлов и попробуйте снова.
+                  </p>
+                `
+              ),
+              413
+            );
+            return;
+          }
 
           sendHtml(
             res,
