@@ -1,0 +1,23 @@
+[Unit]
+Description=Karimoff — разовый WAL-safe backup БД (запускается таймером karimoff-backup.timer)
+
+[Service]
+Type=oneshot
+User=karimoff
+Group=karimoff
+WorkingDirectory=/opt/karimoff
+# Безопасный снимок SQLite с учётом WAL (не требует остановки приложения).
+ExecStart=/usr/bin/node -e "const Database=require('better-sqlite3');const db=new Database('karimoff.db',{readonly:true});db.backup('/var/backups/karimoff/karimoff-'+new Date().toISOString().replace(/[:.]/g,'-')+'.db').then(()=>{db.close();console.log('backup ok')}).catch(e=>{db.close();console.error(e);process.exit(1)})"
+ExecStartPost=/bin/bash -c 'ls -1t /var/backups/karimoff/karimoff-*.db 2>/dev/null | tail -n +15 | xargs -r rm -f'
+
+# Hardening: запись только в /var/backups/karimoff (чтение БД — из /opt/karimoff)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/backups/karimoff

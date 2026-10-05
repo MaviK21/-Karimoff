@@ -1,0 +1,44 @@
+[Unit]
+Description=Karimoff website (Node.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=karimoff
+Group=karimoff
+WorkingDirectory=/opt/karimoff
+ExecStart=/usr/bin/node server.js
+Environment=NODE_ENV=production
+# Секреты читаются приложением из /opt/karimoff/.env через dotenv.
+# EnvironmentFile не используем, чтобы не дублировать источник.
+
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Журнал -> journald (ротация настраивается journald'ом)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=karimoff
+
+# --- Hardening ---
+# /usr, /boot, /etc, /efi монтируются read-only. Запись нужна приложению
+# только в его каталог (karimoff.db, karimoff.db-wal, karimoff.db-shm,
+# uploads/, backups/) — разрешена по умолчанию и явно задокументирована
+# через ReadWritePaths.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/opt/karimoff /var/backups/karimoff
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target
