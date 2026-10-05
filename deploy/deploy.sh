@@ -176,7 +176,12 @@ cmd_tls() {
 
   log "установка финального TLS-конфига nginx (80 -> 443, HSTS)"
   install -m 644 "${APP_DIR}/deploy/nginx/karimoff.conf" /etc/nginx/sites-available/karimoff
-  nginx -t && systemctl reload nginx
+
+  if ! nginx -t; then
+    err "nginx -t провален — reload не выполнялся, проверьте конфиг"
+    exit 1
+  fi
+  systemctl reload nginx
 
   certbot renew --dry-run >/dev/null && ok "автопродление сертификата настроено"
   healthcheck
