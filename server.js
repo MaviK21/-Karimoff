@@ -29,6 +29,13 @@ if (!ADMIN_PASSWORD) {
   );
 }
 
+// В production сайт обслуживается только по HTTPS (nginx + Let's Encrypt),
+// поэтому все cookie получают флаг Secure: они не уйдут по открытому HTTP.
+// На локальной разработке (http://localhost) флаг ломает работу, поэтому он
+// включается только при NODE_ENV=production.
+const COOKIE_SECURE_FLAG =
+  process.env.NODE_ENV === "production" ? "; Secure" : "";
+
 const mailTransporter =
   nodemailer.createTransport({
     host: process.env.SMTP_HOST,
@@ -1371,7 +1378,44 @@ const MULTIPART_TOO_LARGE_MESSAGE =
   "Загружаемые данные слишком большие.";
 
 
-function parseMultipartBody(req, contentType, maxBytes = MULTIPART_LIMITS.publicPhotos) {
+// Ограничения multipart задаются ВСЕГО СРАЗУ: общий размер тела (maxBytes),
+// количество файлов (maxFiles) и размер одного файла (maxFileSize).
+// Лимиты передаются в Busboy, поэтому они срабатывают во время разбора
+// потока, а не после накопления тела в памяти.
+const MULTIPART_DEFAULTS = {
+  maxFiles: 12,
+  maxFileSize: 10 * 1024 * 1024,
+  maxFields: 60,
+  maxParts: 200
+};
+
+const MULTIPART_TOO_MANY_FILES_MESSAGE =
+  "Слишком много загружаемых файлов.";
+
+// Опции для маршрутов, принимающих видео (до 50 МБ) и документы (до 20 МБ):
+// размер одного файла поднимается до лимита видео, количество ограничивается.
+// Общий размер тела всё равно контролируется MULTIPART_LIMITS маршрута.
+const MULTIPART_VIDEO_OPTIONS = {
+  maxFiles: 30,
+  maxFileSize: 50 * 1024 * 1024
+};
+
+function parseMultipartBody(
+  req,
+  contentType,
+  maxBytes = MULTIPART_LIMITS.publicPhotos,
+  options = {}
+) {
+  const maxFiles =
+    Number.isInteger(options.maxFiles) && options.maxFiles > 0
+      ? options.maxFiles
+      : MULTIPART_DEFAULTS.maxFiles;
+
+  const maxFileSize =
+    Number.isInteger(options.maxFileSize) && options.maxFileSize > 0
+      ? options.maxFileSize
+      : MULTIPART_DEFAULTS.maxFileSize;
+
   return new Promise((resolve, reject) => {
     // Content-Length проверяем до чтения потока: слишком большой запрос
     // вообще не должен попадать в память.
@@ -1389,6 +1433,13 @@ function parseMultipartBody(req, contentType, maxBytes = MULTIPART_LIMITS.public
       parser = Busboy({
         headers: {
           "content-type": contentType
+        },
+        limits: {
+          fileSize: maxFileSize,
+          files: maxFiles,
+          fields: MULTIPART_DEFAULTS.maxFields,
+          parts: MULTIPART_DEFAULTS.maxParts,
+          headerPairs: 2000
         }
       });
     } catch (error) {
@@ -1457,7 +1508,25 @@ function parseMultipartBody(req, contentType, maxBytes = MULTIPART_LIMITS.public
           chunks.push(chunk);
         });
 
+        file.on("close", () => {
+          // Busboy обрывает поток файла при достижении limits.fileSize и
+          // выставляет truncated. Проверяем здесь, чтобы не сохранять
+          // обрезанные байты и не копить данные дальше.
+          if (file.truncated) {
+            chunks.length = 0;
+            const sizeError = new Error(
+              "Один из файлов превышает допустимый размер."
+            );
+            sizeError.statusCode = 413;
+            rejectFile(sizeError);
+          }
+        });
+
         file.on("end", () => {
+          if (file.truncated) {
+            return;
+          }
+
           const fileData = {
             filename: info.filename,
             contentType: info.mimeType || "application/octet-stream",
@@ -1562,11 +1631,26 @@ async function saveUploadedImage(file, allowedTypesOverride) {
     return "";
   }
 
+  // SVG отклоняем сразу: sharp его декодирует, что может привести к RCE / DoS.
+  if (file.contentType === "image/svg+xml") {
+    throw new Error("Файлы SVG не поддерживаются.");
+  }
+
+  // GIF отклоняем: не перекодируется sharp в статичный формат,
+  // анимация теряется, а растровые форматы безопаснее.
+  if (file.contentType === "image/gif") {
+    throw new Error("Файлы GIF не поддерживаются.");
+  }
+
+  // HEIC отклоняем: требует внешнего кодека HEVC, который может отсутствовать.
+  if (file.contentType === "image/heic" || file.contentType === "image/heic-sequence") {
+    throw new Error("Файлы HEIC не поддерживаются.");
+  }
+
   const allowedTypes = allowedTypesOverride || {
     "image/jpeg": ".jpg",
     "image/png": ".png",
-    "image/webp": ".webp",
-    "image/gif": ".gif"
+    "image/webp": ".webp"
   };
 
   const extension =
@@ -1574,7 +1658,7 @@ async function saveUploadedImage(file, allowedTypesOverride) {
 
   if (!extension) {
     throw new Error(
-      "Разрешены только JPG, PNG, WebP и GIF"
+      "Разрешены только JPG, PNG и WebP"
     );
   }
 
@@ -1588,16 +1672,19 @@ async function saveUploadedImage(file, allowedTypesOverride) {
   }
 
   const detectedFormat = detectImageFormat(file.data);
-  const acceptedDetectedFormats = file.contentType === "image/heic-sequence"
-    ? ["image/heic"]
-    : [file.contentType];
 
-  if (!detectedFormat || !acceptedDetectedFormats.includes(detectedFormat)) {
+  if (!detectedFormat) {
     throw new Error(
-      "Содержимое файла не соответствует заявленному формату или формат не поддерживается."
+      "Не удалось определить формат изображения."
     );
   }
 
+  // Проверка: фактический формат должен совпадать с заявленным.
+  if (detectedFormat !== file.contentType) {
+    throw new Error(
+      "Содержимое файла не соответствует заявленному формату."
+    );
+  }
 
   const uploadsDir =
     pathModule.join(
@@ -1621,21 +1708,17 @@ async function saveUploadedImage(file, allowedTypesOverride) {
     filename
   );
 
-  const supportedFormats = {
-    "image/jpeg": true,
-    "image/png": true,
-    "image/webp": true
-  };
-  let imageProcessor = supportedFormats[file.contentType]
-    ? sharp(file.data)
-        .rotate()
-        .resize({
-          width: 2000,
-          height: 2000,
-          fit: "inside",
-          withoutEnlargement: true
-        })
-    : null;
+  // Sharp: перекодируем изображение (убираем embedded скрипты и т.п.),
+  // ограничиваем вводимые пиксели для защиты от DoS (268 МП — верхний лимит libvips).
+  let imageProcessor = sharp(file.data)
+    .rotate()
+    .limitInputPixels(268402688) // 256 МП + запас
+    .resize({
+      width: 2000,
+      height: 2000,
+      fit: "inside",
+      withoutEnlargement: true
+    });
 
   if (file.contentType === "image/jpeg") {
     imageProcessor = imageProcessor.jpeg({ quality: 80, mozjpeg: true });
@@ -1645,9 +1728,7 @@ async function saveUploadedImage(file, allowedTypesOverride) {
     imageProcessor = imageProcessor.webp({ quality: 80, effort: 5 });
   }
 
-  const data = imageProcessor
-    ? await imageProcessor.toBuffer()
-    : file.data;
+  const data = await imageProcessor.toBuffer();
 
   writeFileSync(
     filePath,
@@ -2274,7 +2355,7 @@ function renderServiceRequestForm(values = {}, errors = {}) {
             type="file"
             name="photos"
             multiple
-            accept="image/jpeg,image/png,image/webp,image/heic"
+            accept="image/jpeg,image/png,image/webp"
             id="service-request-photos"
           >
         </label>
@@ -2668,7 +2749,7 @@ function renderRepairRequestForm(values = {}, errors = {}) {
             type="file"
             name="photos"
             multiple
-            accept="image/jpeg,image/png,image/webp,image/heic"
+            accept="image/jpeg,image/png,image/webp"
           >
         </label>
 
@@ -3769,7 +3850,7 @@ function setCart(res, cart) {
 
   res.setHeader(
     "Set-Cookie",
-    `cart=${value}; Path=/; Max-Age=2592000; SameSite=Lax`
+    `cart=${value}; Path=/; Max-Age=2592000; SameSite=Lax${COOKIE_SECURE_FLAG}`
   );
 }
 
@@ -3850,7 +3931,7 @@ function setFavorites(res, favorites) {
 
   res.setHeader(
     "Set-Cookie",
-    `favs=${value}; Path=/; Max-Age=2592000; SameSite=Lax`
+    `favs=${value}; Path=/; Max-Age=2592000; SameSite=Lax${COOKIE_SECURE_FLAG}`
   );
 }
 
@@ -3886,7 +3967,7 @@ const server =
             currentCsrfToken = randomBytes(32).toString("hex");
             res.setHeader(
               "Set-Cookie",
-              `csrf_token=${currentCsrfToken}; Path=/; SameSite=Lax; Max-Age=604800`
+              `csrf_token=${currentCsrfToken}; Path=/; SameSite=Lax; Max-Age=604800${COOKIE_SECURE_FLAG}`
             );
           }
         }
@@ -5375,7 +5456,7 @@ if (
 
           res.setHeader(
             "Set-Cookie",
-            `admin=${adminToken}; HttpOnly; Path=/; SameSite=Lax`
+            `admin=${adminToken}; HttpOnly; Path=/; SameSite=Lax${COOKIE_SECURE_FLAG}`
           );
 
 
@@ -5742,7 +5823,7 @@ if (
 
           res.setHeader(
             "Set-Cookie",
-            "admin=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax"
+            "admin=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax" + COOKIE_SECURE_FLAG
           );
 
           return redirect(
@@ -6605,7 +6686,7 @@ if (req.method === "GET" && path === "/buy-one-click") {
 
     res.setHeader(
       "Set-Cookie",
-      "one_click_form=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/buy-one-click"
+      "one_click_form=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/buy-one-click" + COOKIE_SECURE_FLAG
     );
   }
 
@@ -7452,7 +7533,7 @@ if (
   "Set-Cookie",
   "one_click_form=" +
     encodeURIComponent(JSON.stringify(formState)) +
-    "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/buy-one-click"
+    "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/buy-one-click" + COOKIE_SECURE_FLAG
 );
 
 return redirect(
@@ -8782,13 +8863,6 @@ return redirect(
                   return { ...photoFile, contentType: "image/webp" };
                 }
 
-                if (
-                  lowerName.endsWith(".heic") ||
-                  lowerName.endsWith(".heif")
-                ) {
-                  return { ...photoFile, contentType: "image/heic" };
-                }
-
                 return photoFile;
               });
 
@@ -8801,9 +8875,7 @@ return redirect(
                     {
                       "image/jpeg": ".jpg",
                       "image/png": ".png",
-                      "image/webp": ".webp",
-                      "image/heic": ".heic",
-                      "image/heic-sequence": ".heic"
+                      "image/webp": ".webp"
                     }
                   );
                   if (photoPath) {
@@ -8813,7 +8885,7 @@ return redirect(
               } catch (uploadError) {
                 formErrors.photos =
                   uploadError?.message ||
-                  "Не удалось загрузить фото. Разрешены форматы JPG, JPEG, PNG, WEBP, HEIC, размер — до 10 МБ.";
+                  "Не удалось загрузить фото. Разрешены форматы JPG, PNG, WEBP, размер — до 10 МБ.";
 
                 return sendHtml(
                   res,
@@ -9261,13 +9333,6 @@ return redirect(
                   return { ...photoFile, contentType: "image/webp" };
                 }
 
-                if (
-                  lowerName.endsWith(".heic") ||
-                  lowerName.endsWith(".heif")
-                ) {
-                  return { ...photoFile, contentType: "image/heic" };
-                }
-
                 return photoFile;
               });
  
@@ -9280,9 +9345,7 @@ return redirect(
                     {
                       "image/jpeg": ".jpg",
                       "image/png": ".png",
-                      "image/webp": ".webp",
-                      "image/heic": ".heic",
-                      "image/heic-sequence": ".heic"
+                      "image/webp": ".webp"
                     }
                   );
                   if (photoPath) {
@@ -9292,7 +9355,7 @@ return redirect(
               } catch (uploadError) {
                 formErrors.photos =
                   uploadError?.message ||
-                  "Не удалось загрузить фото. Разрешены форматы JPG, JPEG, PNG, WEBP, HEIC, размер — до 10 МБ.";
+                  "Не удалось загрузить фото. Разрешены форматы JPG, PNG, WEBP, размер — до 10 МБ.";
 
                 return sendHtml(
                   res,
@@ -9551,7 +9614,7 @@ return redirect(
 
             res.setHeader(
               "Set-Cookie",
-              "checkout_form=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/checkout"
+              "checkout_form=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/checkout" + COOKIE_SECURE_FLAG
             );
           }
 
@@ -9941,7 +10004,7 @@ if (isValidPhone(phone)) {
               "Set-Cookie",
               "checkout_form=" +
                 encodeURIComponent(JSON.stringify(formState)) +
-                "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/checkout"
+                "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/checkout" + COOKIE_SECURE_FLAG
             );
 
             return redirect(
@@ -10031,7 +10094,7 @@ if (isValidPhone(phone)) {
              "Set-Cookie",
              "checkout_form=" +
                encodeURIComponent(JSON.stringify(formState)) +
-               "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/checkout"
+               "; Max-Age=600; HttpOnly; SameSite=Lax; Path=/checkout" + COOKIE_SECURE_FLAG
            );
 
            return redirect(
@@ -11344,7 +11407,7 @@ for (
                     <input
   type="file"
   name="image"
-  accept="image/jpeg,image/png,image/webp,image/gif"
+  accept="image/jpeg,image/png,image/webp"
 >
                   </p>
 
@@ -11550,7 +11613,7 @@ const params =
   await parseMultipartBody(
     req,
     contentType
-  , MULTIPART_LIMITS.adminProducts);
+  , MULTIPART_LIMITS.adminProducts, MULTIPART_VIDEO_OPTIONS);
 
           if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
             return sendCsrfForbidden(res, req);
@@ -12879,7 +12942,7 @@ value="${sortOrderValue ?? product.sort_order}"
                     <input
   type="file"
   name="image"
-  accept="image/jpeg,image/png,image/webp,image/gif"
+  accept="image/jpeg,image/png,image/webp"
 >
                   </p>
 
@@ -12972,7 +13035,7 @@ if (
   const id = Number(path.split("/")[2]);
 
   const contentType = req.headers["content-type"] || "";
-  const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminProducts);
+  const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminProducts, MULTIPART_VIDEO_OPTIONS);
 
   if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
     return sendCsrfForbidden(res, req);
@@ -13958,7 +14021,7 @@ if (
 
                   <p>
                     Изображение:
-                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp">
                   </p>
 
                   <p>
@@ -14129,7 +14192,7 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminMedia);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminMedia, MULTIPART_VIDEO_OPTIONS);
 
           if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
             return sendCsrfForbidden(res, req);
@@ -14256,7 +14319,7 @@ if (
 
                   <p>
                     Изображение:
-                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp">
                     ${service.image ? `<br><img src="${escapeHtml(service.image)}" alt="${escapeHtml(service.name)}" width="150">` : ""}
                   </p>
 
@@ -14428,7 +14491,7 @@ if (
           }
 
           const contentType = req.headers["content-type"] || "";
-          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminMedia);
+          const params = await parseMultipartBody(req, contentType, MULTIPART_LIMITS.adminMedia, MULTIPART_VIDEO_OPTIONS);
 
           if (!isCsrfValid(req, getCsrfFromRequest(req, params))) {
             return sendCsrfForbidden(res, req);
@@ -14621,7 +14684,7 @@ if (
 
                   <p>
                     Главное изображение:
-                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp">
                   </p>
 
                   <p>
@@ -14786,7 +14849,7 @@ if (
 
                   <p>
                     Главное изображение:
-                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp">
                     ${project.image ? `<br><img src="${escapeHtml(project.image)}" alt="${escapeHtml(project.name)}" width="150">` : ""}
                   </p>
 
@@ -15014,12 +15077,12 @@ if (
 
                   <p>
                     Изображение:
-                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp">
                   </p>
 
                   <p>
                     Дополнительные изображения:
-                    <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp,image/gif">
+                    <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp">
                   </p>
 
                   <p>
@@ -15162,7 +15225,7 @@ if (
             ? `
                 <p>
                   Загрузить дополнительные изображения:
-                  <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp,image/gif">
+                  <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp">
                 </p>
                 <fieldset>
                   <legend>Дополнительные изображения</legend>
@@ -15177,7 +15240,7 @@ if (
             : `
                 <p>
                   Загрузить дополнительные изображения:
-                  <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp,image/gif">
+                  <input type="file" name="gallery" multiple accept="image/jpeg,image/png,image/webp">
                 </p>
               `;
 
@@ -15208,7 +15271,7 @@ if (
 
                   <p>
                     Изображение:
-                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp,image/gif">
+                    <input type="file" name="image" accept="image/jpeg,image/png,image/webp">
                     ${item.image ? `<br><img src="${escapeHtml(item.image)}" alt="${escapeHtml(item.title)}" width="150">` : ""}
                   </p>
 
@@ -15432,7 +15495,7 @@ if (
                     <input
                       type="file"
                       name="image"
-                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      accept="image/jpeg,image/png,image/webp"
                       ${banner?.image ? "" : "required"}
                     >
                     ${banner?.image ? `<br><img src="${escapeHtml(banner.image)}" alt="${escapeHtml(banner.title)}" width="200">` : ""}

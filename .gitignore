@@ -8,3 +8,6 @@ server.log
 karimoff.db
 karimoff.db-journal
 backups/
+
+# Загруженные пользователем файлы
+uploads/
