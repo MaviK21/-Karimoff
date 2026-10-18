@@ -96,9 +96,13 @@ body.public-page .cookie-notice button:focus-visible {
 html:has(body.public-page) { background: #eef2f6; }
 
 /* ===== Центральный контейнер публичных страниц ===== */
+/* Фрейм занимает всю доступную ширину окна: раньше он был жёстко ограничен
+   1160px, из-за чего по краям оставались пустые полосы и сайт выглядел
+   «обрезанным» на широких мониторах. Боковое поле --frame-gutter объявлено
+   на body.public-page и наследуется всеми зонами (16–32px адаптивно). */
 .site-frame {
   box-sizing: border-box;
-  max-width: 1160px;
+  width: 100%;
   margin: 0 auto;
 }
 
@@ -106,7 +110,7 @@ html:has(body.public-page) { background: #eef2f6; }
 
 .site-frame--content {
   background: #fff;
-  padding: 0 32px 40px;
+  padding: 0 var(--frame-gutter) 40px;
 }
 
 .site-frame--footer { margin-top: 0; }
@@ -119,6 +123,7 @@ body.public-page {
   color: #252a31;
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.55;
+  --frame-gutter: clamp(16px, 3vw, 32px);
 }
 
 body.public-page a {
@@ -174,7 +179,7 @@ body.public-page input[type="submit"]:hover {
   align-items: center;
   justify-content: space-between;
   gap: 6px 24px;
-  padding: 0 24px;
+  padding: 0 var(--frame-gutter, 24px);
   min-height: 44px;
 }
 
@@ -251,7 +256,7 @@ body.public-page .top-bar-callback:focus-visible {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px 16px;
-  padding: 0 24px;
+  padding: 0 var(--frame-gutter, 24px);
   min-height: 59px;
 }
 
@@ -365,7 +370,7 @@ body.public-page .site-search button:hover { border-color: #d95f18; background: 
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 6px;
-  padding: 0 16px;
+  padding: 0 var(--frame-gutter, 16px);
   min-height: 40px;
 }
 
@@ -1495,7 +1500,7 @@ body.home-page .home-hero {
   align-items: stretch;
   box-sizing: border-box;
   width: 100%;
-  min-height: 512px;
+  min-height: 480px;
   margin: 0 0 0;
   overflow: hidden;
   background: #1f4468;
@@ -1527,7 +1532,7 @@ body.home-page .home-hero .home-hero-inner {
   display: flex;
   align-items: center;
   width: 100%;
-  padding: 44px 36px;
+  padding: 40px 36px;
 }
 
 body.home-page .home-hero .home-hero-text {
@@ -1608,9 +1613,11 @@ body.home-page .home-hero a.home-hero-cta--ghost:focus-visible {
   color: #fff;
 }
 
-/* Hero и статистика — во всю ширину контентного фрейма */
+/* Hero и статистика — во всю ширину контентного фрейма.
+   Отрицательный отступ равен боковому полю фрейма, иначе полоса
+   выходит за край экрана и появляется горизонтальная прокрутка. */
 body.home-page .home-top {
-  margin-inline: -32px;
+  margin-inline: calc(var(--frame-gutter, 32px) * -1);
 }
 
 /* ===== Оранжевая статистическая полоса ===== */
@@ -1663,10 +1670,76 @@ body.home-page .home-stats .home-stats-label {
   }
 }
 
+/* Ссылка «Все …→» в заголовках секций главной — подача сайт-визитки:
+   каждый блок главной ведёт в полный раздел сайта. */
+body.home-page .home-below h2 .section-more,
+body.public-page section > h2 .section-more {
+  float: right;
+  margin-top: 4px;
+  color: #f0762b;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+body.home-page .home-below h2 .section-more:hover,
+body.public-page section > h2 .section-more:hover {
+  color: #d95f18;
+  text-decoration: underline;
+}
+
+/* Ограничение ширины текстовых абзацев для читаемости на широких экранах */
+body.home-page .home-below > section > p {
+  max-width: 90ch;
+}
+
+@media (max-width: 640px) {
+  body.home-page .home-below h2 .section-more,
+  body.public-page section > h2 .section-more {
+    display: block;
+    float: none;
+    margin-top: 6px;
+  }
+}
+
+/* ===== Блок контактов на главной =====
+   Полноширинная полоса (отрицательный отступ = боковое поле фрейма,
+   как у .home-top), а внутреннее содержимое ограничено 1100px и
+   центрировано через padding-inline с max(). Проценты в padding
+   считаются от ширины контейнера (.site-frame--content = 100% - 2*gutter),
+   поэтому к формуле добавлены оба поля фрейма: итоговый отступ от края
+   окна = max(gutter, (100vw - 1100px) / 2). На узких экранах max()
+   даёт безопасное поле gutter от края экрана. */
+body.home-page #contacts {
+  box-sizing: border-box;
+  margin-inline: calc(var(--frame-gutter, 32px) * -1);
+  padding: 26px max(var(--frame-gutter, 32px), calc((100% - 1100px + var(--frame-gutter, 32px) * 2) / 2)) 28px;
+  background: #f2f6fa;
+  border-top: 1px solid #e1e7ee;
+}
+
+body.home-page #contacts h2 {
+  margin: 0 0 12px;
+  font-size: 20px;
+}
+
+body.home-page #contacts p {
+  margin: 6px 0;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  body.home-page #contacts {
+    padding-top: 20px;
+    padding-bottom: 22px;
+  }
+}
+
 /* ===== Футер — navy-система ===== */
 body.public-page footer {
   margin: 0;
-  padding: 34px 32px 22px;
+  padding: 34px var(--frame-gutter, 32px) 22px;
   background: #1f4468;
   color: #e6edf4;
 }
@@ -1860,7 +1933,7 @@ body.public-page footer .footer-copy {
 .page-hero-band-inner {
   box-sizing: border-box;
   width: 100%;
-  padding: 0 24px;
+  padding: 0 var(--frame-gutter, 24px);
 }
 
 .page-hero-band-title {
@@ -1871,9 +1944,9 @@ body.public-page footer .footer-copy {
   overflow-wrap: anywhere;
 }
 
-/* Полоса внутренних страниц — во всю ширину фрейма */
+/* Полоса внутренних страниц — во всю ширину фрейма (см. --frame-gutter) */
 .page-hero-band {
-  margin-inline: -32px;
+  margin-inline: calc(var(--frame-gutter, 32px) * -1);
 }
 
 /* ===== Страница каталога: hero, раскладка, панель фильтров ===== */

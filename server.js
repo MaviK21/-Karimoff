@@ -148,14 +148,18 @@ const TOPBAR_PLACEHOLDER = {
 };
 
 const HERO_PLACEHOLDER = {
-  title: "Техника, товары и услуги — всё в одном месте",
-  description: "Каталог из 300+ товаров, аренда спецтехники, ремонт — для частных лиц и организаций Лепельского и Витебского районов.",
+  // Формулировки только по подтверждённым сведениям: товары, техника и услуги.
+  // Утверждения про объёмы («300+ товаров», «500+ клиентов») удалены как
+  // неподтверждённые — их нельзя проверить данными проекта.
+  title: "Товары, техника и услуги",
+  description: "Karimoff предлагает товары, технику и услуги для частных лиц и организаций.",
   buttonText: "Перейти в каталог",
   buttonUrl: "/catalog",
   image: "/uploads/hero-fallback.jpg"
 };
 
-// PLACEHOLDER: цифры статистики с эталона — заменить реальными показателями.
+// PLACEHOLDER: цифры статистики с эталона. На главной не выводятся
+// (неподтверждённые показатели), сохранены до получения реальных данных.
 const HOME_STATS_PLACEHOLDER = [
   { value: "300+", label: "Товаров в каталоге" },
   { value: "500+", label: "Довольных клиентов" },
@@ -4188,9 +4192,13 @@ if (
 
           const contacts = getContactSettings();
 
-          // Статистика первого экрана: временные значения эталона
-          // (HOME_STATS_PLACEHOLDER), не рассчитываются из тестовой БД.
-          const homeStatsHtml = `
+          // Статистика первого экрана скрыта: значения HOME_STATS_PLACEHOLDER
+          // не подтверждены данными проекта (в БД 12 товаров, 0 заказов,
+          // 0 услуг). Флаг возвращает блок после подтверждения показателей
+          // заказчиком — разметка и данные сохранены.
+          const SHOW_HOME_STATS = false;
+          const homeStatsHtml = SHOW_HOME_STATS
+            ? `
             <section class="home-stats" aria-label="Ключевые показатели">
               ${HOME_STATS_PLACEHOLDER.map(item => `
                 <div class="home-stats-item">
@@ -4199,7 +4207,8 @@ if (
                 </div>
               `).join("")}
             </section>
-          `;
+          `
+            : "";
 
           // Hero: реальный баннер имеет приоритет, иначе placeholder первого экрана.
           // hero-fallback.jpg уже содержит утверждённое затемнение, поэтому
@@ -4251,7 +4260,7 @@ if (
                         <a class="home-hero-cta home-hero-cta--primary" href="${escapeHtml(heroData.buttonUrl)}">
                           ${escapeHtml(heroData.buttonText)}
                         </a>
-                        <a class="home-hero-cta home-hero-cta--ghost" href="/services">Наши услуги</a>
+                        <a class="home-hero-cta home-hero-cta--ghost" href="/contacts">Контакты</a>
                       </div>
                     </div>
                   </div>
@@ -4265,7 +4274,7 @@ if (
                         <section>
                           <h2>${escapeHtml(aboutPage.title)}</h2>
                           <p>${escapeHtml(aboutPreview)}${aboutPage.content.trim().split(/\s+/).length > 35 ? "…" : ""}</p>
-                          <p><a href="/about">Подробнее об О компании</a></p>
+                          <p><a href="/about">Подробнее об компании</a></p>
                         </section>
                       `
                       : ""
@@ -4274,7 +4283,7 @@ if (
                 ${
                   services.length > 0
                     ? `
-                      <h2>Услуги</h2>
+                      <h2>Услуги <a class="section-more" href="/services">Все услуги →</a></h2>
 
                       <ul>
                         ${services.map(service => `
@@ -4308,7 +4317,7 @@ if (
                 ${
                   projects.length > 0
                     ? `
-                      <h2>Проекты</h2>
+                      <h2>Проекты <a class="section-more" href="/projects">Все проекты →</a></h2>
 
                       <ul>
                         ${projects.map(project => `
@@ -4342,7 +4351,7 @@ if (
                 ${
                   news.length > 0
                     ? `
-                      <h2>Новости</h2>
+                      <h2>Новости <a class="section-more" href="/news">Все новости →</a></h2>
 
                       <ul>
                         ${news.map(item => `
@@ -4389,7 +4398,7 @@ if (
                 }
 
                 <section id="contacts">
-                  <h2>Контакты</h2>
+                  <h2>Контакты <a class="section-more" href="/contacts">Все контакты →</a></h2>
                   ${contacts.contact_phone ? `<p>Телефон: <a href="tel:${escapeHtml(contacts.contact_phone)}">${escapeHtml(contacts.contact_phone)}</a></p>` : ""}
                   ${contacts.contact_email ? `<p>Email: <a href="mailto:${escapeHtml(contacts.contact_email)}">${escapeHtml(contacts.contact_email)}</a></p>` : ""}
                   ${contacts.contact_address ? `<p>Адрес: ${escapeHtml(contacts.contact_address)}</p>` : ""}
