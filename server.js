@@ -12,7 +12,7 @@ const SIG_MESSAGE =
 
 import { fileURLToPath } from "url";
 import fs from "fs/promises";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, writeFileSync, rmSync } from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = pathModule.dirname(__filename);
@@ -1379,25 +1379,44 @@ const MULTIPART_TOO_LARGE_MESSAGE =
 
 
 // Ограничения multipart задаются ВСЕГО СРАЗУ: общий размер тела (maxBytes),
-// количество файлов (maxFiles) и размер одного файла (maxFileSize).
-// Лимиты передаются в Busboy, поэтому они срабатывают во время разбора
-// потока, а не после накопления тела в памяти.
+// количество файлов (maxFiles), размер одного файла (maxFileSize), количество
+// и размер текстовых полей. Лимиты передаются в Busboy, поэтому они
+// срабатывают во время разбора потока, а не после накопления тела в памяти.
+// Все величины — в двоичных МиБ (1 МиБ = 1024 * 1024 байт).
 const MULTIPART_DEFAULTS = {
   maxFiles: 12,
   maxFileSize: 10 * 1024 * 1024,
   maxFields: 60,
+  maxFieldSize: 1 * 1024 * 1024,
   maxParts: 200
 };
 
 const MULTIPART_TOO_MANY_FILES_MESSAGE =
   "Слишком много загружаемых файлов.";
 
-// Опции для маршрутов, принимающих видео (до 50 МБ) и документы (до 20 МБ):
+const MULTIPART_TOO_MANY_FIELDS_MESSAGE =
+  "Слишком много полей в отправленной форме.";
+
+const MULTIPART_TOO_MANY_PARTS_MESSAGE =
+  "Слишком много частей в отправленных данных.";
+
+// Публичные формы заявок (ремонт, услуга) по ТЗ: не более 10 файлов
+// по 10 МиБ каждый. Общий лимит тела publicPhotos = 110 МиБ даёт запас
+// ~10 МиБ на multipart-обвязку (границы, заголовки частей) и текстовые
+// поля формы (не более 60 полей по 1 МиБ).
+const MULTIPART_PUBLIC_OPTIONS = {
+  maxFiles: 10,
+  maxFileSize: 10 * 1024 * 1024
+};
+
+// Опции для маршрутов, принимающих видео (до 50 МиБ) и документы (до 20 МиБ):
 // размер одного файла поднимается до лимита видео, количество ограничивается.
 // Общий размер тела всё равно контролируется MULTIPART_LIMITS маршрута.
 const MULTIPART_VIDEO_OPTIONS = {
   maxFiles: 30,
-  maxFileSize: 50 * 1024 * 1024
+  maxFileSize: 50 * 1024 * 1024,
+  maxFields: 60,
+  maxFieldSize: 1 * 1024 * 1024
 };
 
 function parseMultipartBody(
@@ -1415,6 +1434,16 @@ function parseMultipartBody(
     Number.isInteger(options.maxFileSize) && options.maxFileSize > 0
       ? options.maxFileSize
       : MULTIPART_DEFAULTS.maxFileSize;
+
+  const maxFields =
+    Number.isInteger(options.maxFields) && options.maxFields > 0
+      ? options.maxFields
+      : MULTIPART_DEFAULTS.maxFields;
+
+  const maxFieldSize =
+    Number.isInteger(options.maxFieldSize) && options.maxFieldSize > 0
+      ? options.maxFieldSize
+      : MULTIPART_DEFAULTS.maxFieldSize;
 
   return new Promise((resolve, reject) => {
     // Content-Length проверяем до чтения потока: слишком большой запрос
@@ -1435,14 +1464,25 @@ function parseMultipartBody(
           "content-type": contentType
         },
         limits: {
-          fileSize: maxFileSize,
+          // Busboy помечает файл truncated уже при fileSize === лимиту,
+          // поэтому передаём лимит + 1 байт: файл ровно maxFileSize байт
+          // остаётся допустимым, а больше — отсекается и отклоняется.
+          fileSize: maxFileSize + 1,
           files: maxFiles,
-          fields: MULTIPART_DEFAULTS.maxFields,
+          fields: maxFields,
+          // Аналогично fileSize: Busboy молча обрезает поле до fieldSize,
+          // поэтому лимит + 1 байт, а настоящая проверка — в parser.on("field").
+          fieldSize: maxFieldSize + 1,
           parts: MULTIPART_DEFAULTS.maxParts,
           headerPairs: 2000
         }
       });
     } catch (error) {
+      // Busboy бросает «Unsupported content type» синхронно: это ошибка
+      // запроса клиента (400), а не internals сервера (500).
+      if (!error.statusCode) {
+        error.statusCode = 400;
+      }
       reject(error);
       return;
     }
@@ -1450,34 +1490,44 @@ function parseMultipartBody(
     const fields = new Map();
     const files = new Map();
     const filePromises = [];
+    const activeChunkLists = [];
+
+    // Флаг «запрос отклонён» — защищает от двойного reject и от
+    // продолжения бизнес-логики после срабатывания любого лимита.
+    let settled = false;
+
+    const safeReject = (err) => {
+      if (settled) return;
+      settled = true;
+      // Не закрываем парсер здесь — finish / error всё равно
+      // сработает. Важно: очищаем буферы файлов.
+      for (const chunkList of activeChunkLists) {
+        chunkList.length = 0;
+      }
+      reject(err);
+    };
 
     // Счётчик байтов всего тела: работает и для chunked-запросов,
     // у которых нет Content-Length. Подвешивается до req.pipe(parser).
     let receivedBytes = 0;
-    let limitExceeded = false;
-    const activeChunkLists = [];
 
     const abortOnLimit = () => {
-      if (limitExceeded) {
-        return;
-      }
-      limitExceeded = true;
-      // Сбрасываем уже накопленные буферы файлов — данные не сохранятся.
-      for (const chunkList of activeChunkLists) {
-        chunkList.length = 0;
-      }
-      req.unpipe(parser);
-      if (typeof parser.destroy === "function") {
-        parser.destroy();
-      }
-      // Остаток тела сливаем без накопления в память.
-      req.resume();
+      // Отклоняем запрос с 413 ДО разрушения парсера и закрытия соединения.
+      // Это позволяет Node отправить HTTP-ответ клиенту.
+      // Тело дренируется через req.resume(), чтобы Node не ждал окончания
+      // chunked-запроса и не сбросил соединение до отправки 413.
       const tooLargeError = new Error(MULTIPART_TOO_LARGE_MESSAGE);
       tooLargeError.statusCode = 413;
-      reject(tooLargeError);
+      safeReject(tooLargeError);
+
+      // Отключаем парсер от req и сливаем остаток тела без накопления.
+      // Без parser.destroy() — чтобы Node успел отправить 413-ответ.
+      req.unpipe(parser);
+      req.resume();
     };
 
     req.on("data", chunk => {
+      if (settled) return;
       receivedBytes += chunk.length;
 
       if (receivedBytes > maxBytes) {
@@ -1485,10 +1535,43 @@ function parseMultipartBody(
       }
     });
 
+    // ===== Busboy-события лимитов =====
+    // filesLimit / fieldsLimit / partsLimit — Busboy прекращает
+    // обработку новых частей, но finish всё равно вызывается.
+    // Подписываемся, чтобы отклонить запрос явно.
+
+    parser.on("filesLimit", () => {
+      const err = new Error(MULTIPART_TOO_MANY_FILES_MESSAGE);
+      err.statusCode = 413;
+      safeReject(err);
+    });
+
+    parser.on("fieldsLimit", () => {
+      const err = new Error(MULTIPART_TOO_MANY_FIELDS_MESSAGE);
+      err.statusCode = 413;
+      safeReject(err);
+    });
+
+    parser.on("partsLimit", () => {
+      const err = new Error(MULTIPART_TOO_MANY_PARTS_MESSAGE);
+      err.statusCode = 413;
+      safeReject(err);
+    });
+
     parser.on("field", (name, value) => {
-      if (limitExceeded) {
+      if (settled) return;
+
+      // Busboy при достижении fieldSize молча обрезает значение и не
+      // генерирует событие (в отличие от filesLimit). Передаём ему
+      // лимит + 1 байт и отклоняем запрос здесь, если поле длиннее
+      // допустимого. Считаем байты, а не символы: лимит задан в байтах.
+      if (Buffer.byteLength(value) > maxFieldSize) {
+        const err = new Error("Одно из полей превышает допустимый размер.");
+        err.statusCode = 413;
+        safeReject(err);
         return;
       }
+
       if (!fields.has(name)) {
         fields.set(name, []);
       }
@@ -1497,14 +1580,18 @@ function parseMultipartBody(
     });
 
     parser.on("file", (name, file, info) => {
+      if (settled) {
+        // Busboy уже пропустил файл из-за filesLimit — игнорируем.
+        file.resume();
+        return;
+      }
+
       const chunks = [];
       activeChunkLists.push(chunks);
 
       const filePromise = new Promise((resolveFile, rejectFile) => {
         file.on("data", chunk => {
-          if (limitExceeded) {
-            return;
-          }
+          if (settled) return;
           chunks.push(chunk);
         });
 
@@ -1518,12 +1605,15 @@ function parseMultipartBody(
               "Один из файлов превышает допустимый размер."
             );
             sizeError.statusCode = 413;
-            rejectFile(sizeError);
+            safeReject(sizeError);
+            return;
           }
         });
 
         file.on("end", () => {
-          if (file.truncated) {
+          if (file.truncated) return;
+          if (settled) {
+            // Запрос уже отклонён другим лимитом — не сохраняем.
             return;
           }
 
@@ -1541,15 +1631,33 @@ function parseMultipartBody(
           resolveFile();
         });
 
-        file.on("error", rejectFile);
+        file.on("error", (err) => {
+          if (file.truncated) {
+            const sizeError = new Error(
+              "Один из файлов превышает допустимый размер."
+            );
+            sizeError.statusCode = 413;
+            safeReject(sizeError);
+          } else {
+            safeReject(err);
+          }
+        });
       });
 
       filePromises.push(filePromise);
     });
 
-    parser.on("error", reject);
+    parser.on("error", (err) => {
+      // Busboy internal error (malformed multipart и т.п.)
+      if (settled) return;
+      const parseError = new Error("Ошибка обработки multipart-данных.");
+      parseError.statusCode = 400;
+      safeReject(parseError);
+    });
 
     parser.on("finish", async () => {
+      if (settled) return;
+
       try {
         await Promise.all(filePromises);
 
@@ -1572,8 +1680,19 @@ function parseMultipartBody(
           }
         });
       } catch (error) {
-        reject(error);
+        safeReject(error);
       }
+    });
+
+    // Клиент оборвал соединение до конца тела: без этой обработки
+    // промис завис бы навсегда и обработчик маршрута не завершился.
+    req.on("close", () => {
+      if (settled || req.readableEnded) {
+        return;
+      }
+      const abortedError = new Error("Соединение закрыто до конца запроса.");
+      abortedError.statusCode = 400;
+      safeReject(abortedError);
     });
 
     req.pipe(parser);
@@ -1709,10 +1828,11 @@ async function saveUploadedImage(file, allowedTypesOverride) {
   );
 
   // Sharp: перекодируем изображение (убираем embedded скрипты и т.п.),
-  // ограничиваем вводимые пиксели для защиты от DoS (268 МП — верхний лимит libvips).
-  let imageProcessor = sharp(file.data)
+  // ограничиваем входные пиксели для защиты от DoS (268 МП — верхний
+  // лимит libvips). limitInputPixels — опция конструктора, а не цепной
+  // метод sharp этой версии.
+  let imageProcessor = sharp(file.data, { limitInputPixels: 268402688 })
     .rotate()
-    .limitInputPixels(268402688) // 256 МП + запас
     .resize({
       width: 2000,
       height: 2000,
@@ -2162,6 +2282,27 @@ function saveUploadedDocument(file, allowedTypesOverride) {
   );
 
   return `/uploads/${filename}`;
+}
+
+// Удаляет ТОЛЬКО файлы, сохранённые текущим запросом (пути из photoPaths,
+// созданные saveUploadedImage). Ошибки игнорируются: очистка не должна
+// перекрывать исходную ошибку отказа и не может уронить процесс.
+// Повторный вызов безопасен (rmSync force не бросает на отсутствующем файле).
+function removeUploadedPhotos(photoPaths) {
+  for (const photoPath of photoPaths) {
+    // Защита от path traversal: удаляем только сгенерированные нами
+    // файлы вида /uploads/<32 hex>.<jpg|png|webp>.
+    if (!/^\/uploads\/[a-f0-9]{32}\.(jpg|png|webp)$/.test(photoPath)) {
+      continue;
+    }
+
+    try {
+      rmSync(pathModule.join(__dirname, photoPath), { force: true });
+    } catch {
+      // Файл мог исчезнуть или быть залочен (антивирус Windows) —
+      // не критично: мусорный файл не создаёт запись в БД.
+    }
+  }
 }
 
 // ======================================================
@@ -8722,7 +8863,7 @@ return redirect(
               await parseMultipartBody(
                 req,
                 contentType
-              , MULTIPART_LIMITS.publicPhotos);
+              , MULTIPART_LIMITS.publicPhotos, MULTIPART_PUBLIC_OPTIONS);
 
             if (isHoneypotFilled(params)) {
               return sendHoneypotDecoy(res, req, "/repair-request");
@@ -8833,6 +8974,23 @@ return redirect(
               );
             }
 
+            // Токен расходуем ДО сохранения файлов: отказ по токену
+            // не должен оставлять сиротские файлы в uploads/.
+            // Атомарный DELETE внутри consumeRequestToken сохраняет
+            // одноразовость; при последующем отказе токен уже сожжён —
+            // в ветках ошибок формы выдаём новый.
+            if (!consumeRequestToken(params.get("request_token"))) {
+              return sendHtml(
+                res,
+                renderPage(
+                  req,
+                  "Заявка уже отправлена",
+                  `<h1>Заявка уже отправлена или форма устарела.</h1>`
+                ),
+                400
+              );
+            }
+
             // Браузеры часто не знают MIME-тип HEIC и отправляют application/octet-stream.
             // Определяем тип по расширению файла, чтобы фото не терялись.
             const photoFilesWithFallbackType =
@@ -8883,6 +9041,14 @@ return redirect(
                   }
                 }
               } catch (uploadError) {
+                // Часть файлов могла сохраниться до отказа на N-м файле —
+                // удаляем только пути из photoPaths текущего запроса.
+                removeUploadedPhotos(photoPaths);
+                photoPaths = [];
+                // Токен уже израсходован до загрузки — выдаём форме новый,
+                // иначе повторная отправка с исправленным файлом даст 400.
+                formValues.request_token = createRequestToken();
+
                 formErrors.photos =
                   uploadError?.message ||
                   "Не удалось загрузить фото. Разрешены форматы JPG, PNG, WEBP, размер — до 10 МБ.";
@@ -8901,21 +9067,12 @@ return redirect(
               }
             }
 
-            if (!consumeRequestToken(params.get("request_token"))) {
-              return sendHtml(
-                res,
-                renderPage(
-                  req,
-                  "Заявка уже отправлена",
-                  `<h1>Заявка уже отправлена или форма устарела.</h1>`
-                ),
-                400
-              );
-            }
+             let result;
 
-             const result =
-               db.prepare(`
-                 INSERT INTO orders
+             try {
+               result =
+                 db.prepare(`
+                   INSERT INTO orders
                  (
                    name,
                    phone,
@@ -8949,6 +9106,11 @@ return redirect(
                 problem,
                 photoPaths.join(",")
               );
+             } catch (dbError) {
+               // Заявка не создана — сохранённые фото сироты, удаляем.
+               removeUploadedPhotos(photoPaths);
+               throw dbError; // глобальный catch отдаст 500
+             }
 
             const orderId =
               Number(
@@ -9127,7 +9289,7 @@ return redirect(
               await parseMultipartBody(
                 req,
                 contentType
-              , MULTIPART_LIMITS.publicPhotos);
+              , MULTIPART_LIMITS.publicPhotos, MULTIPART_PUBLIC_OPTIONS);
 
             if (isHoneypotFilled(params)) {
               return sendHoneypotDecoy(res, req, "/service-request");
@@ -9303,6 +9465,23 @@ return redirect(
                );
              }
 
+            // Токен расходуем ДО сохранения файлов: отказ по токену
+            // не должен оставлять сиротские файлы в uploads/.
+            // Атомарный DELETE внутри consumeRequestToken сохраняет
+            // одноразовость; при последующем отказе токен уже сожжён —
+            // в ветках ошибок формы выдаём новый.
+            if (!consumeRequestToken(params.get("request_token"))) {
+              return sendHtml(
+                res,
+                renderPage(
+                  req,
+                  "Заявка уже отправлена",
+                  `<h1>Заявка уже отправлена или форма устарела.</h1>`
+                ),
+                400
+              );
+            }
+
             // Браузеры часто не знают MIME-тип HEIC и отправляют application/octet-stream.
             // Определяем тип по расширению файла, чтобы фото не терялись.
             const photoFilesWithFallbackType =
@@ -9353,6 +9532,14 @@ return redirect(
                   }
                 }
               } catch (uploadError) {
+                // Часть файлов могла сохраниться до отказа на N-м файле —
+                // удаляем только пути из photoPaths текущего запроса.
+                removeUploadedPhotos(photoPaths);
+                photoPaths = [];
+                // Токен уже израсходован до загрузки — выдаём форме новый,
+                // иначе повторная отправка с исправленным файлом даст 400.
+                formValues.request_token = createRequestToken();
+
                 formErrors.photos =
                   uploadError?.message ||
                   "Не удалось загрузить фото. Разрешены форматы JPG, PNG, WEBP, размер — до 10 МБ.";
@@ -9371,19 +9558,10 @@ return redirect(
               }
              }
 
-            if (!consumeRequestToken(params.get("request_token"))) {
-              return sendHtml(
-                res,
-                renderPage(
-                  req,
-                  "Заявка уже отправлена",
-                  `<h1>Заявка уже отправлена или форма устарела.</h1>`
-                ),
-                400
-              );
-            }
+            let result;
 
-            const result =
+            try {
+              result =
               db.prepare(`
                 INSERT INTO orders
                 (
@@ -9419,6 +9597,11 @@ return redirect(
                duration,
                photoPaths.join(",")
              );
+            } catch (dbError) {
+              // Заявка не создана — сохранённые фото сироты, удаляем.
+              removeUploadedPhotos(photoPaths);
+              throw dbError; // глобальный catch отдаст 500
+            }
 
             const orderId =
               Number(
@@ -17294,6 +17477,29 @@ ${renderCsrfField()}
                 `
               ),
               413
+            );
+            return;
+          }
+
+          // Повреждённые multipart-данные — ошибка клиента (400),
+          // а не internals сервера (500).
+          if (error && error.statusCode === 400) {
+            sendHtml(
+              res,
+              renderPage(
+                req,
+                "Некорректные данные",
+                `
+                  <h1>400 — Некорректные данные</h1>
+
+                  <p>
+                    Отправленные данные повреждены или имеют
+                    недопустимый формат. Обновите страницу и
+                    попробуйте снова.
+                  </p>
+                `
+              ),
+              400
             );
             return;
           }
