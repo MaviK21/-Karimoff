@@ -4207,9 +4207,25 @@ const server =
       safeName
     );
 
+  // Явная проверка: итоговый путь должен находиться строго внутри UPLOADS_DIR.
+  // pathModule.resolve нормализует "..", "//" и т.п. — сравнение префикса с
+  // разделителем гарантирует, что путь не просто начинается с текста каталога.
+  const resolvedPath = pathModule.resolve(filePath);
+  if (
+    !resolvedPath.startsWith(
+      pathModule.resolve(UPLOADS_DIR) + pathModule.sep
+    )
+  ) {
+    return sendHtml(
+      res,
+      "Файл не найден",
+      404
+    );
+  }
+
   try {
     const data =
-      await fs.readFile(filePath);
+      await fs.readFile(resolvedPath);
 
     const ext =
       pathModule
