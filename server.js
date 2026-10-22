@@ -9119,8 +9119,14 @@ return redirect(
                 // иначе повторная отправка с исправленным файлом даст 400.
                 formValues.request_token = createRequestToken();
 
+                // Сырую ошибку (включая FS-стек с абсолютными путями)
+                // пользователю не передаём — только обобщённое сообщение.
+                console.error(
+                  "[upload] error:",
+                  uploadError?.message || uploadError
+                );
+
                 formErrors.photos =
-                  uploadError?.message ||
                   "Не удалось загрузить фото. Разрешены форматы JPG, PNG, WEBP, размер — до 10 МБ.";
 
                 return sendHtml(
@@ -9610,8 +9616,14 @@ return redirect(
                 // иначе повторная отправка с исправленным файлом даст 400.
                 formValues.request_token = createRequestToken();
 
+                // Сырую ошибку (включая FS-стек с абсолютными путями)
+                // пользователю не передаём — только обобщённое сообщение.
+                console.error(
+                  "[upload] error:",
+                  uploadError?.message || uploadError
+                );
+
                 formErrors.photos =
-                  uploadError?.message ||
                   "Не удалось загрузить фото. Разрешены форматы JPG, PNG, WEBP, размер — до 10 МБ.";
 
                 return sendHtml(
