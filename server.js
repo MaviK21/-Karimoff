@@ -90,7 +90,19 @@ function sendCsrfForbidden(res, req) {
   );
 }
 
-let adminToken = null;
+// ======================================================
+// АДМИНИСТРАТИВНАЯ СЕССИЯ
+// Хранение в памяти процесса (одна активная сессия).
+// Абсолютный срок — от момента входа, бездействие — скользящее окно.
+// Значения можно сузить через env только для тестов; по умолчанию 12ч / 2ч.
+// ======================================================
+const ADMIN_SESSION_ABSOLUTE_MS =
+  Number(process.env.ADMIN_SESSION_ABSOLUTE_MS) || 12 * 60 * 60 * 1000;
+const ADMIN_SESSION_IDLE_MS =
+  Number(process.env.ADMIN_SESSION_IDLE_MS) || 2 * 60 * 60 * 1000;
+
+// { token, absoluteExpiresAt, lastSeenAt } | null
+let adminSession = null;
 
 
 const UPLOADS_DIR =
@@ -259,12 +271,33 @@ function searchDistance(a, b) {
 }
 
 function isAdmin(req) {
+  if (!adminSession) {
+    return false;
+  }
+
+  const now = Date.now();
+
+  // Абсолютный срок сессии не продлевается активностью.
+  if (now >= adminSession.absoluteExpiresAt) {
+    adminSession = null;
+    return false;
+  }
+
   const cookies = parseCookies(req);
 
-  return Boolean(
-    adminToken &&
-    cookies.admin === adminToken
-  );
+  if (cookies.admin !== adminSession.token) {
+    return false;
+  }
+
+  // Скользящее окно бездействия: продлевается только при успешной
+  // проверке действующей сессии (абсолютный срок — нет).
+  if (now - adminSession.lastSeenAt > ADMIN_SESSION_IDLE_MS) {
+    adminSession = null;
+    return false;
+  }
+
+  adminSession.lastSeenAt = now;
+  return true;
 }
 
 
@@ -992,7 +1025,10 @@ function renderMenu(req, adminPanelPage = false) {
         <a href="/admin/news">Новости</a> |
         <a href="/admin/main-banner">Главный баннер</a> |
         <a href="/admin/pages">Страницы</a> |
-        <a href="/admin/logout">Выход</a>
+        <form method="POST" action="/admin/logout" style="display:inline;">
+          ${renderCsrfField()}
+          <button type="submit" style="background:none;border:none;padding:0;font:inherit;color:inherit;cursor:pointer;text-decoration:underline;">Выход</button>
+        </form>
       </nav>
 
       <hr>
@@ -5605,15 +5641,20 @@ if (
 
           clearAdminLoginFailures(clientIp);
 
-          adminToken =
-            randomBytes(
-              32
-            ).toString("hex");
+          // Новый вход инвалидирует предыдущую сессию: генерируется
+          // новый токен, старые cookie становятся недействительны.
+          adminSession = {
+            token: randomBytes(32).toString("hex"),
+            absoluteExpiresAt: Date.now() + ADMIN_SESSION_ABSOLUTE_MS,
+            lastSeenAt: Date.now()
+          };
 
-
+          // Max-Age cookie равен абсолютному сроку сессии: cookie не
+          // переживёт серверную сессию. При idle-таймауте cookie может
+          // остаться в браузере, но сервер её уже не примет.
           res.setHeader(
             "Set-Cookie",
-            `admin=${adminToken}; HttpOnly; Path=/; SameSite=Lax${COOKIE_SECURE_FLAG}`
+            `admin=${adminSession.token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(ADMIN_SESSION_ABSOLUTE_MS / 1000)}${COOKIE_SECURE_FLAG}`
           );
 
 
@@ -5969,14 +6010,27 @@ if (
 
         // ==================================================
         // АДМИН — LOGOUT
+        // POST + CSRF: выход защищён от поддельных кросс-сайтовых
+        // запросов (раньше GET /admin/logout позволял разлогинить
+        // администратора чужой страницей).
         // ==================================================
 
         if (
-          req.method === "GET" &&
+          req.method === "POST" &&
           path === "/admin/logout"
         ) {
 
-          adminToken = null;
+          if (!requireAdmin(req, res)) {
+            return;
+          }
+
+          const logoutParams = await readBody(req);
+
+          if (!isCsrfValid(req, getCsrfFromRequest(req, logoutParams))) {
+            return sendCsrfForbidden(res, req);
+          }
+
+          adminSession = null;
 
           res.setHeader(
             "Set-Cookie",
