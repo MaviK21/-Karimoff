@@ -132,6 +132,45 @@ function escapeHtml(value = "") {
     .replaceAll("'", "&#039;");
 }
 
+// Категоризация ошибок для production-логов (allowlist).
+// Возвращает только фиксированную строку-категорию: без сообщения,
+// стека, абсолютных путей, SQL-текста и секретов. Порядок проверок:
+// SQLite → известные SMTP-коды → файловые/сетевые коды → UNKNOWN.
+// Исходный текст ошибки в обычный лог не попадает никогда.
+function classifyError(error) {
+  if (!error || (typeof error !== "object" && typeof error !== "string")) {
+    return "UNKNOWN";
+  }
+
+  const code = typeof error === "object" ? error.code : undefined;
+
+  // 1) better-sqlite3 / SQLite
+  if (typeof code === "string" && code.startsWith("SQLITE_")) {
+    return "DB_ERROR";
+  }
+
+  // 2) Известные SMTP/сетевые коды nodemailer
+  if (
+    typeof code === "string" &&
+    [
+      "EAUTH",
+      "ECONNECTION",
+      "ETIMEDOUT",
+      "EHOSTUNREACH",
+      "ECONNREFUSED"
+    ].includes(code)
+  ) {
+    return "SMTP_ERROR";
+  }
+
+  // 3) Файловые/системные коды Node.js (ENOENT, EACCES, ENOSPC, EISDIR...)
+  if (typeof code === "string" && /^E[A-Z]+$/.test(code)) {
+    return "FS_ERROR";
+  }
+
+  // Всё остальное — общий код без исходного текста
+  return "UNKNOWN";
+}
 
 function parseCookies(req) {
   const cookieHeader = req.headers.cookie || "";
@@ -7872,7 +7911,7 @@ return redirect(
              } catch (error) {
                console.error(
                  "Ошибка отправки email заявки:",
-                 error?.message || error
+                 classifyError(error)
                );
              }
            }
@@ -8853,7 +8892,7 @@ return redirect(
              } catch (emailError) {
                console.error(
                  "Ошибка отправки email заявки:",
-                 emailError?.message || emailError
+                 classifyError(emailError)
                );
              }
            }
@@ -9123,7 +9162,7 @@ return redirect(
                 // пользователю не передаём — только обобщённое сообщение.
                 console.error(
                   "[upload] error:",
-                  uploadError?.message || uploadError
+                  classifyError(uploadError)
                 );
 
                 formErrors.photos =
@@ -9264,7 +9303,7 @@ return redirect(
               } catch (emailError) {
                 console.error(
                   "Ошибка отправки email заявки:",
-                  emailError?.message || emailError
+                  classifyError(emailError)
                 );
               }
             }
@@ -9620,7 +9659,7 @@ return redirect(
                 // пользователю не передаём — только обобщённое сообщение.
                 console.error(
                   "[upload] error:",
-                  uploadError?.message || uploadError
+                  classifyError(uploadError)
                 );
 
                 formErrors.photos =
@@ -9763,7 +9802,7 @@ return redirect(
               } catch (emailError) {
                 console.error(
                   "Ошибка отправки email заявки:",
-                  emailError?.message || emailError
+                  classifyError(emailError)
                 );
               }
             }
@@ -10532,7 +10571,7 @@ if (isValidPhone(phone)) {
              } catch (error) {
                console.error(
                  "Ошибка отправки email заказа:",
-                 error?.message || error
+                 classifyError(error)
                );
              }
             }
@@ -10557,7 +10596,7 @@ if (isValidPhone(phone)) {
               } catch (error) {
                 console.error(
                   "Ошибка отправки email клиенту:",
-                  error?.message || error
+                  classifyError(error)
                 );
               }
             }
@@ -13744,7 +13783,7 @@ await saveUploadedImage(
             } catch (unlinkError) {
               console.error(
                 "Не удалось удалить файл галереи:",
-                unlinkError?.message || unlinkError
+                classifyError(unlinkError)
               );
             }
           }
@@ -13830,7 +13869,7 @@ await saveUploadedImage(
             } catch (unlinkError) {
               console.error(
                 "Не удалось удалить файл видео:",
-                unlinkError?.message || unlinkError
+                classifyError(unlinkError)
               );
             }
           }
@@ -13921,7 +13960,7 @@ await saveUploadedImage(
             } catch (unlinkError) {
               console.error(
                 "Не удалось удалить файл документа:",
-                unlinkError?.message || unlinkError
+                classifyError(unlinkError)
               );
             }
           }
@@ -14500,10 +14539,13 @@ if (
           try {
             image = imageFile ? await saveUploadedImage(imageFile) : "";
             video = videoFile ? saveUploadedVideo(videoFile) : "";
-          } catch (error) {
+          } catch (uploadError) {
+            // Нейтральное сообщение: исходный текст ошибки (формат файла,
+            // сбой диска и т.п.) администратору не показываем.
+            console.error("[admin] service create upload error:", classifyError(uploadError));
             return sendHtml(
               res,
-              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              renderPage(req, "Ошибка", `<h1>Не удалось сохранить изображение или видео. Проверьте файл и повторите попытку.</h1>`),
               400
             );
           }
@@ -14803,10 +14845,11 @@ if (
             if (videoFile) {
               video = saveUploadedVideo(videoFile);
             }
-          } catch (error) {
+          } catch (uploadError) {
+            console.error("[admin] service update upload error:", classifyError(uploadError));
             return sendHtml(
               res,
-              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              renderPage(req, "Ошибка", `<h1>Не удалось сохранить изображение или видео. Проверьте файл и повторите попытку.</h1>`),
               400
             );
           }
@@ -15037,10 +15080,11 @@ if (
           let image = "";
           try {
             image = imageFile ? await saveUploadedImage(imageFile) : "";
-          } catch (error) {
+          } catch (uploadError) {
+            console.error("[admin] project create upload error:", classifyError(uploadError));
             return sendHtml(
               res,
-              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              renderPage(req, "Ошибка", `<h1>Не удалось сохранить изображение проекта. Проверьте файл и повторите попытку.</h1>`),
               400
             );
           }
@@ -15190,10 +15234,11 @@ if (
             if (imageFile) {
               image = await saveUploadedImage(imageFile);
             }
-          } catch (error) {
+          } catch (uploadError) {
+            console.error("[admin] project update upload error:", classifyError(uploadError));
             return sendHtml(
               res,
-              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              renderPage(req, "Ошибка", `<h1>Не удалось сохранить изображение проекта. Проверьте файл и повторите попытку.</h1>`),
               400
             );
           }
@@ -15432,10 +15477,11 @@ if (
           let image = "";
           try {
             image = imageFile ? await saveUploadedImage(imageFile) : "";
-          } catch (error) {
+          } catch (uploadError) {
+            console.error("[admin] news create upload error:", classifyError(uploadError));
             return sendHtml(
               res,
-              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              renderPage(req, "Ошибка", `<h1>Не удалось сохранить изображение новости. Проверьте файл и повторите попытку.</h1>`),
               400
             );
           }
@@ -15611,10 +15657,11 @@ if (
             if (imageFile) {
               image = await saveUploadedImage(imageFile);
             }
-          } catch (error) {
+          } catch (uploadError) {
+            console.error("[admin] news update upload error:", classifyError(uploadError));
             return sendHtml(
               res,
-              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              renderPage(req, "Ошибка", `<h1>Не удалось сохранить изображение новости. Проверьте файл и повторите попытку.</h1>`),
               400
             );
           }
@@ -15867,10 +15914,11 @@ if (
             if (imageFile) {
               image = await saveUploadedImage(imageFile);
             }
-          } catch (error) {
+          } catch (uploadError) {
+            console.error("[admin] banner upload error:", classifyError(uploadError));
             return sendHtml(
               res,
-              renderPage(req, "Ошибка", `<h1>${escapeHtml(error.message)}</h1>`),
+              renderPage(req, "Ошибка", `<h1>Не удалось сохранить изображение баннера. Проверьте файл и повторите попытку.</h1>`),
               400
             );
           }
@@ -17533,9 +17581,11 @@ ${renderCsrfField()}
 
       } catch (error) {
 
+        // В production-лог попадает только категория из allowlist:
+        // исходное сообщение, стек, пути и SQL не логируются.
         console.error(
-          "Ошибка сервера:",
-          error
+          "[server] error:",
+          classifyError(error)
         );
 
 
@@ -17652,7 +17702,7 @@ async function createDatabaseBackup() {
 
     console.log(`Резервная копия БД создана: ${backupPath}`);
   } catch (error) {
-    console.error("Не удалось создать резервную копию БД:", error);
+    console.error("[backup] error:", classifyError(error));
   } finally {
     backupInProgress = false;
   }
