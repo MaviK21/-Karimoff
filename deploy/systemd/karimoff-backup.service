@@ -9,6 +9,15 @@ WorkingDirectory=/opt/karimoff
 # Безопасный снимок SQLite с учётом WAL (не требует остановки приложения).
 ExecStart=/usr/bin/node -e "const Database=require('better-sqlite3');const db=new Database('karimoff.db',{readonly:true});db.backup('/var/backups/karimoff/karimoff-'+new Date().toISOString().replace(/[:.]/g,'-')+'.db').then(()=>{db.close();console.log('backup ok')}).catch(e=>{db.close();console.error(e);process.exit(1)})"
 ExecStartPost=/bin/bash -c 'ls -1t /var/backups/karimoff/karimoff-*.db 2>/dev/null | tail -n +15 | xargs -r rm -f'
+# Снимок uploads/: временный каталог -> rsync -> атомарная публикация mv -> ротация.
+# Логика вынесена в deploy/uploads-backup.sh: systemd раскрывает %X-спецификаторы
+# и $VAR/${VAR} прямо в Exec-строке, что ломает date +%Y...%s и невидимо искажает
+# аргументы. Отдельный скрипт от этого защищён.
+# Ошибки выводятся в stderr (попадают в journald) и помечают задание failed.
+# Ротация выполняется ТОЛЬКО после успешной публикации, только по завершённым снимкам.
+# Предыдущие снимки при любой ошибке не затрагиваются.
+# Без префикса '-': ненулевой код возврата засчитывается как failure.
+ExecStartPost=/bin/bash /opt/karimoff/deploy/uploads-backup.sh
 
 # Hardening: запись только в /var/backups/karimoff (чтение БД — из /opt/karimoff)
 NoNewPrivileges=true
