@@ -371,6 +371,49 @@ function requireAdmin(req, res) {
 }
 
 
+// Разбор URL запроса БЕЗ доверия к заголовку Host: база парсинга —
+// фиксированная константа (хост из Host никогда не используется в
+// выводах). Некорректный request-target (например "//") даёт null —
+// вызывающий отвечает 400, сервер не падает.
+function parseRequestUrl(req) {
+  try {
+    return new URL(req.url, "http://localhost");
+  } catch {
+    return null;
+  }
+}
+
+// Автономная HTML-страница для обработчика ошибок. Не вызывает
+// renderPage(): обработчик ошибок не должен зависеть от разбора
+// запроса, БД и состояния рендера. Повторный ответ невозможен:
+// проверяются headersSent / writableEnded / destroyed.
+function sendFallbackHtml(res, statusCode, title, message) {
+  if (res.headersSent || res.writableEnded || res.destroyed) {
+    return;
+  }
+
+  const html = `<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${escapeHtml(title)}</title>
+</head>
+<body style="font-family:system-ui,sans-serif;margin:2rem;line-height:1.5">
+<h1>${escapeHtml(title)}</h1>
+<p>${escapeHtml(message)}</p>
+<p><a href="/">Перейти на главную</a></p>
+</body>
+</html>`;
+
+  res.writeHead(statusCode, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store"
+  });
+  res.end(html);
+}
+
 function sendHtml(
   res,
   body,
@@ -502,10 +545,10 @@ function renderPage(
   content,
   options = {}
 ) {
-  const pathname = new URL(
-    req.url,
-    `http://${req.headers.host || "localhost"}`
-  ).pathname;
+  // Парсинг без доверия к Host; некорректный URL не должен ронять рендер —
+  // в этом случае pathname считается пустым (тема/хлебные крошки не нужны).
+  const renderUrl = parseRequestUrl(req);
+  const pathname = renderUrl ? renderUrl.pathname : "";
   let breadcrumbs = "";
 
   // Тематическая верхняя полоса внутренних страниц: navy overlay + заголовок.
@@ -553,10 +596,7 @@ function renderPage(
     const breadcrumbItems = [
       { label: "Главная", href: "/" }
     ];
-    const requestUrl = new URL(
-      req.url,
-      `http://${req.headers.host || "localhost"}`
-    );
+    const requestUrl = renderUrl;
 
     if (pathname === "/catalog") {
       breadcrumbItems.push({ label: "Каталог", href: null });
@@ -1395,25 +1435,72 @@ const HONEYPOT_FIELD =
   `<input type="text" name="company_website" value="" class="honeypot-field" tabindex="-1" autocomplete="off" aria-hidden="true">`;
 
 
+const MAX_BODY_BYTES = 1_000_000;
+
+// Читает urlencoded-тело в байтовые буферы с лимитом MAX_BODY_BYTES БАЙТ.
+// Promise settle'ится ровно один раз (settled-флаг). Превышение лимита —
+// reject с statusCode 413 без req.destroy(): соединение живёт, ответ
+// отдаёт глобальный обработчик. Поток продолжает читаться (data-слушатель
+// остаётся), поэтому Node не рвёт сокет из-за недопрочитанного тела.
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let body = "";
+    function tooLargeError() {
+      const error = new Error("Request body too large");
+      error.statusCode = 413;
+      return error;
+    }
+
+    const declaredLength = Number(req.headers["content-length"]);
+    if (
+      Number.isFinite(declaredLength) &&
+      declaredLength > MAX_BODY_BYTES
+    ) {
+      req.on("data", () => {}); // draining: соединение остаётся живым
+      reject(tooLargeError());
+      return;
+    }
+
+    const chunks = [];
+    let receivedBytes = 0;
+    let settled = false;
+
+    function settle(error) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (error) {
+        reject(error);
+      } else {
+        resolve(
+          new URLSearchParams(
+            Buffer.concat(chunks).toString("utf8")
+          )
+        );
+      }
+    }
 
     req.on("data", chunk => {
-      body += chunk;
-
-      if (body.length > 1_000_000) {
-        req.destroy();
+      if (settled) {
+        return;
       }
+      receivedBytes += chunk.length;
+      if (receivedBytes > MAX_BODY_BYTES) {
+        chunks.length = 0;
+        settle(tooLargeError());
+        return;
+      }
+      chunks.push(chunk);
     });
 
-    req.on("end", () => {
-      resolve(
-        new URLSearchParams(body)
-      );
+    req.on("end", () => settle());
+    req.on("error", settle);
+    req.on("aborted", settle);
+    // Преждевременный close без 'end' (обрыв клиентом): иначе Promise
+    // остался бы незавершённым навсегда.
+    req.on("close", () => {
+      settle(new Error("Request aborted"));
     });
-
-    req.on("error", reject);
   });
 }
 
@@ -1479,9 +1566,11 @@ const MULTIPART_TOO_MANY_PARTS_MESSAGE =
 // по 10 МиБ каждый. Общий лимит тела publicPhotos = 110 МиБ даёт запас
 // ~10 МиБ на multipart-обвязку (границы, заголовки частей) и текстовые
 // поля формы (не более 60 полей по 1 МиБ).
+// pool: "public" — запросы идут в отдельный пул слотов (см. MULTIPART_SLOTS).
 const MULTIPART_PUBLIC_OPTIONS = {
   maxFiles: 10,
-  maxFileSize: 10 * 1024 * 1024
+  maxFileSize: 10 * 1024 * 1024,
+  pool: "public"
 };
 
 // Опции для маршрутов, принимающих видео (до 50 МиБ) и документы (до 20 МиБ):
@@ -1493,6 +1582,59 @@ const MULTIPART_VIDEO_OPTIONS = {
   maxFields: 60,
   maxFieldSize: 1 * 1024 * 1024
 };
+
+// ======================================================
+// ОГРАНИЧЕНИЕ КОНКУРЕНТНЫХ MULTIPART-ЗАГРУЗОК
+// ======================================================
+// parseMultipartBody буферизует тело в памяти (chunks[] + Buffer.concat),
+// поэтому пик RAM на запрос ~2x от размера тела. Без ограничения
+// одновременных загрузок несколько крупных запросов могут убить процесс.
+//
+// Расчёт для VPS 4 ГБ RAM (deploy/README.md, MemoryMax в systemd не задан):
+// - admin-запросы (add/edit-product): тело до 300 МиБ -> пик ~600 МиБ.
+//   2 слота = ~1.2 ГиБ.
+// - public-запросы (repair/service): тело до 110 МиБ -> пик ~220 МиБ.
+//   4 слота = ~880 МиБ.
+// - Итого худший случай ~2.1 ГиБ буферов + ~300-400 МиБ RSS Node/sharp
+//   + ОС/nginx: вписывается в 4 ГиБ с запасом.
+// Пулы раздельные, чтобы поток публичных заявок не вытеснял админские
+// загрузки и наоборот.
+const MULTIPART_SLOTS = {
+  public: { max: 4, active: 0 },
+  admin: { max: 2, active: 0 }
+};
+
+const MULTIPART_OVERLOAD_RETRY_AFTER_SECONDS = 5;
+
+// Занимает слот и возвращает true, если свободен. Вызывается ДО создания
+// Busboy и до начала накопления тела в памяти.
+function acquireMultipartSlot(poolKind) {
+  const pool = MULTIPART_SLOTS[poolKind];
+
+  if (pool.active >= pool.max) {
+    return false;
+  }
+
+  pool.active += 1;
+  return true;
+}
+
+function releaseMultipartSlot(poolKind) {
+  const pool = MULTIPART_SLOTS[poolKind];
+
+  if (pool.active > 0) {
+    pool.active -= 1;
+  }
+}
+
+// Ответ при перегрузке: 503 + Retry-After. Ошибку поднимает
+// parseMultipartBody, отправляет глобальный catch.
+function createMultipartOverloadError() {
+  const error = new Error("Сервер временно перегружен загрузками.");
+  error.statusCode = 503;
+  error.retryAfter = MULTIPART_OVERLOAD_RETRY_AFTER_SECONDS;
+  return error;
+}
 
 function parseMultipartBody(
   req,
@@ -1520,9 +1662,13 @@ function parseMultipartBody(
       ? options.maxFieldSize
       : MULTIPART_DEFAULTS.maxFieldSize;
 
+  // К какому пулу слотов относится запрос (см. MULTIPART_SLOTS).
+  const poolKind = options.pool === "public" ? "public" : "admin";
+
   return new Promise((resolve, reject) => {
     // Content-Length проверяем до чтения потока: слишком большой запрос
-    // вообще не должен попадать в память.
+    // вообще не должен попадать в память. Проверяем ДО занятия слота,
+    // чтобы мусор не расходовал ограниченный ресурс конкурентности.
     const contentLength = Number(req.headers["content-length"]);
     if (Number.isFinite(contentLength) && contentLength > maxBytes) {
       const tooLargeError = new Error(MULTIPART_TOO_LARGE_MESSAGE);
@@ -1530,6 +1676,41 @@ function parseMultipartBody(
       reject(tooLargeError);
       return;
     }
+
+    // Слот занимаем до создания Busboy и до начала буферизации тела.
+    // Если свободных слотов нет — сразу 503, парсер не создаётся,
+    // тело не накапливается.
+    if (!acquireMultipartSlot(poolKind)) {
+      // req уже подключён к серверу, поэтому данные продолжают приходить.
+      // Дренируем поток в пустоту (resume), чтобы тело не осело в буфере
+      // сокета и соединение штатно закрылось после ответа.
+      req.resume();
+      reject(createMultipartOverloadError());
+      return;
+    }
+
+    // Освобождение слота ровно один раз на любом исходе разбора.
+    let slotReleased = false;
+    const releaseSlotOnce = () => {
+      if (slotReleased) {
+        return;
+      }
+      slotReleased = true;
+      releaseMultipartSlot(poolKind);
+    };
+
+    // Оборачиваем resolve/reject: слот гарантированно освобождается на
+    // любом завершении разбора — успех, лимит, ошибка парсера, обрыв
+    // соединения. Двойное освобождение исключено флагом slotReleased.
+    const settleResolve = (value) => {
+      releaseSlotOnce();
+      resolve(value);
+    };
+
+    const settleReject = (err) => {
+      releaseSlotOnce();
+      reject(err);
+    };
 
     let parser;
 
@@ -1558,7 +1739,7 @@ function parseMultipartBody(
       if (!error.statusCode) {
         error.statusCode = 400;
       }
-      reject(error);
+      settleReject(error);
       return;
     }
 
@@ -1579,7 +1760,7 @@ function parseMultipartBody(
       for (const chunkList of activeChunkLists) {
         chunkList.length = 0;
       }
-      reject(err);
+      settleReject(err);
     };
 
     // Счётчик байтов всего тела: работает и для chunked-запросов,
@@ -1698,6 +1879,11 @@ function parseMultipartBody(
             data: Buffer.concat(chunks)
           };
 
+          // Buffer.concat уже скопировал байты в fileData.data — сбрасываем
+          // ссылки на исходные чанки, иначе они жили бы до конца запроса
+          // (closure) и удваивали пик памяти на каждый файл.
+          chunks.length = 0;
+
           if (!files.has(name)) {
             files.set(name, []);
           }
@@ -1736,7 +1922,7 @@ function parseMultipartBody(
       try {
         await Promise.all(filePromises);
 
-        resolve({
+        settleResolve({
           get(name) {
             const values = fields.get(name) || [];
             return values[0] || "";
@@ -1818,6 +2004,10 @@ function detectImageFormat(data) {
 
   return null;
 }
+
+// ======================================================
+// СОХРАНЕНИЕ ИЗОБРАЖЕНИЙ / ВИДЕО / ДОКУМЕНТОВ
+// ======================================================
 
 async function saveUploadedImage(file, allowedTypesOverride) {
 
@@ -1946,18 +2136,11 @@ const VIDEO_ALLOWED_TYPES = {
 const VIDEO_ALLOWED_MESSAGE =
   "Разрешены только MP4, WebM, OGG и MOV. Размер — до 50 МБ.";
 
-// Проверяет видео до сохранения, чтобы не создавать товар
-// и не писать файлы, если хотя бы один файл не подходит.
-// Возвращает текст ошибки или пустую строку.
-function getVideoValidationError(files) {
-
-  for (const file of files) {
-
-    if (!file || !file.filename || !file.data.length) {
-
 // ======================================================
 // Проверка фактической сигнатуры содержимого видео
 // (расширение и MIME проверяются отдельно; содержимое — здесь).
+// Хелперы объявлены на верхнем уровне: они нужны и этому
+// валидатору, и saveUploadedVideo (повторная проверка перед записью).
 // ======================================================
 
 const MP4_BRANDS = [
@@ -2000,6 +2183,14 @@ function hasVideoSignature(data, contentType) {
   return false;
 }
 
+// Проверяет видео до сохранения, чтобы не создавать товар
+// и не писать файлы, если хотя бы один файл не подходит.
+// Возвращает текст ошибки или пустую строку.
+function getVideoValidationError(files) {
+
+  for (const file of files) {
+
+    if (!file || !file.filename || !file.data.length) {
       continue;
     }
 
@@ -2009,10 +2200,10 @@ function hasVideoSignature(data, contentType) {
 
     if (file.data.length > VIDEO_MAX_BYTES) {
       return VIDEO_ALLOWED_MESSAGE;
+    }
 
     if (!hasVideoSignature(file.data, file.contentType)) {
       return SIG_MESSAGE;
-    }
     }
   }
 
@@ -2190,18 +2381,11 @@ const DOCUMENT_ALLOWED_TYPES = {
 const DOCUMENT_ALLOWED_MESSAGE =
   "Разрешены только PDF, DOC, DOCX, XLS, XLSX и TXT. Размер — до 20 МБ.";
 
-// Проверяет документы до сохранения, чтобы не создавать товар
-// и не писать файлы, если хотя бы один файл не подходит.
-// Возвращает текст ошибки или пустую строку.
-function getDocumentValidationError(files) {
-
-  for (const file of files) {
-
-    if (!file || !file.filename || !file.data.length) {
-
 // ======================================================
 // Проверка фактического содержимого документов
 // (расширение и MIME проверяются отдельно; содержимое — здесь).
+// Хелперы объявлены на верхнем уровне: они нужны и этому
+// валидатору, и saveUploadedDocument (повторная проверка перед записью).
 // ======================================================
 
 const OLE_SIGNATURE = [
@@ -2278,6 +2462,14 @@ function hasDocumentSignature(data, contentType) {
   return false;
 }
 
+// Проверяет документы до сохранения, чтобы не создавать товар
+// и не писать файлы, если хотя бы один файл не подходит.
+// Возвращает текст ошибки или пустую строку.
+function getDocumentValidationError(files) {
+
+  for (const file of files) {
+
+    if (!file || !file.filename || !file.data.length) {
       continue;
     }
 
@@ -2287,10 +2479,10 @@ function hasDocumentSignature(data, contentType) {
 
     if (file.data.length > DOCUMENT_MAX_BYTES) {
       return DOCUMENT_ALLOWED_MESSAGE;
+    }
 
     if (!hasDocumentSignature(file.data, file.contentType)) {
       return SIG_MESSAGE;
-    }
     }
   }
 
@@ -2359,15 +2551,16 @@ function saveUploadedDocument(file, allowedTypesOverride) {
   return `/uploads/${filename}`;
 }
 
-// Удаляет ТОЛЬКО файлы, сохранённые текущим запросом (пути из photoPaths,
-// созданные saveUploadedImage). Ошибки игнорируются: очистка не должна
-// перекрывать исходную ошибку отказа и не может уронить процесс.
+// Удаляет ТОЛЬКО файлы, сохранённые текущим запросом (пути из
+// saveUploadedImage/saveUploadedVideo/saveUploadedDocument). Ошибки
+// игнорируются: очистка не должна перекрывать исходную ошибку отказа
+// и не может уронить процесс.
 // Повторный вызов безопасен (rmSync force не бросает на отсутствующем файле).
 function removeUploadedPhotos(photoPaths) {
   for (const photoPath of photoPaths) {
     // Защита от path traversal: удаляем только сгенерированные нами
-    // файлы вида /uploads/<32 hex>.<jpg|png|webp>.
-    if (!/^\/uploads\/[a-f0-9]{32}\.(jpg|png|webp)$/.test(photoPath)) {
+    // файлы вида /uploads/<32 hex>.<разрешённое расширение>.
+    if (!/^\/uploads\/[a-f0-9]{32}\.(jpg|png|webp|mp4|webm|ogv|mov|pdf|doc|docx|xls|xlsx|txt)$/.test(photoPath)) {
       continue;
     }
 
@@ -4162,14 +4355,18 @@ const server =
 
       try {
 
-        const url =
-          new URL(
-            req.url,
-            `http://${
-              req.headers.host ||
-              "localhost"
-            }`
+        const url = parseRequestUrl(req);
+
+        if (!url) {
+          // Некорректный request-target (например "//") — ошибка клиента.
+          sendFallbackHtml(
+            res,
+            400,
+            "Некорректный запрос",
+            "Сервер не смог обработать запрос из-за недопустимого URL."
           );
+          return;
+        }
 
         const path =
           url.pathname;
@@ -11960,11 +12157,6 @@ const params =
 const imageFile =
   params.getFile("image");
 
-const image =
-  imageFile
-    ? await saveUploadedImage(imageFile)
-    : "";
-
           const sku =
             params.get("sku")
               ?.trim() || "";
@@ -12144,183 +12336,240 @@ const recommendedIds =
 
       
 
-          const result =
-            db.prepare(`
-              INSERT INTO products
-            (
-              name,
-              price,
-              description,
-              category_id,
-              image,
-              sku,
-              brand_id,
-              currency,
-              availability,
-              price_on_request,
-              unit,
-              discount_percent,
-              is_new,
-              is_hit,
-              sort_order
-            )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(
-            name,
-            price,
-            description,
-            categoryIds[0] ||
-            null,
-            image,
-            sku,
-            brandId,
-            currency,
-            availability,
-            priceOnRequest,
-            unit,
-            discountPercent,
-            isNew,
-            isHit,
-            sortOrder
-          );
+          // Файлы, сохранённые этим запросом: при ошибке записи или БД
+          // удаляем их, чтобы не оставлять осиротевшие файлы и ссылки в БД.
+          const savedMediaPaths = [];
 
+          // Главное изображение сохраняем только после всех валидаций
+          // (sortOrder, поля формы, видео, документы): иначе недопустимый
+          // запрос оставлял бы осиротевший файл до early return.
+          let mainImagePath = "";
 
-          const productId =
-            Number(
-              result.lastInsertRowid
-            );
-
-
-           saveProductCategories(
-             productId,
-             categoryIds
-           );
-
-           saveProductRecommendations(
-             productId,
-             recommendedIds
-           );
-
-           const galleryFiles =
-             params.getAllFiles("gallery");
-
-           const galleryAllowedTypes = {
-             "image/jpeg": ".jpg",
-             "image/png": ".png",
-             "image/webp": ".webp"
-           };
-
-           let gallerySortOrder =
-             db.prepare(`
-               SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
-               FROM product_images
-               WHERE product_id = ?
-             `).get(productId).next_sort_order;
-
-           for (const galleryFile of galleryFiles) {
-    const galleryImage =
-      await saveUploadedImage(
-        galleryFile,
-                 galleryAllowedTypes
-               );
-
-             if (!galleryImage) {
-               continue;
-             }
-
-             db.prepare(`
-               INSERT INTO product_images
-               (
-                 product_id,
-                 image,
-                 sort_order
-               )
-               VALUES (?, ?, ?)
-             `).run(
-               productId,
-               galleryImage,
-               gallerySortOrder++
-             );
-           }
-
-           let videoSortOrder =
-             db.prepare(`
-               SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
-               FROM product_videos
-               WHERE product_id = ?
-             `).get(productId).next_sort_order;
-
-           for (const videoFile of videoFiles) {
-             const videoPath =
-               saveUploadedVideo(videoFile);
-
-             if (!videoPath) {
-               continue;
-             }
-
-             db.prepare(`
-               INSERT INTO product_videos
-               (
-                 product_id,
-                 video,
-                 sort_order
-               )
-               VALUES (?, ?, ?)
-             `).run(
-               productId,
-               videoPath,
-               videoSortOrder++
-             );
-           }
-
-           let documentSortOrder =
-             db.prepare(`
-               SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
-               FROM product_documents
-               WHERE product_id = ?
-             `).get(productId).next_sort_order;
-
-           for (const documentFile of documentFiles) {
-             const documentPath =
-               saveUploadedDocument(documentFile);
-
-             if (!documentPath) {
-               continue;
-             }
-
-             db.prepare(`
-               INSERT INTO product_documents
-               (
-                 product_id,
-                 document,
-                 sort_order
-               )
-               VALUES (?, ?, ?)
-             `).run(
-               productId,
-               documentPath,
-               documentSortOrder++
-             );
-           }
-
-
-
-           for (const characteristic of characteristicValues) {
-            db.prepare(`
-              INSERT INTO product_characteristics
-              (
-                product_id,
-                characteristic_id,
-                value
-              )
-              VALUES (?, ?, ?)
-            `).run(
-              productId,
-              characteristic.characteristicId,
-              characteristic.value
-            );
+          try {
+            mainImagePath = imageFile
+              ? await saveUploadedImage(imageFile)
+              : "";
+            if (mainImagePath) {
+              savedMediaPaths.push(mainImagePath);
+            }
+          } catch (uploadError) {
+            removeUploadedPhotos(savedMediaPaths);
+            throw uploadError;
           }
 
+          // Все файлы готовятся ДО транзакции: перекодировка sharp
+          // асинхронная, а better-sqlite3 запрещает await внутри
+          // db.transaction(). Внутри транзакции остаются только
+          // синхронные INSERT.
+          const galleryFiles =
+            params.getAllFiles("gallery");
+
+          const galleryAllowedTypes = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp"
+          };
+
+          const savedGalleryPaths = [];
+          const savedVideoPaths = [];
+          const savedDocumentPaths = [];
+
+          try {
+            for (const galleryFile of galleryFiles) {
+              const galleryImage =
+                await saveUploadedImage(
+                  galleryFile,
+                  galleryAllowedTypes
+                );
+
+              if (!galleryImage) {
+                continue;
+              }
+
+              savedGalleryPaths.push(galleryImage);
+              savedMediaPaths.push(galleryImage);
+            }
+
+            for (const videoFile of videoFiles) {
+              const videoPath =
+                saveUploadedVideo(videoFile);
+
+              if (!videoPath) {
+                continue;
+              }
+
+              savedVideoPaths.push(videoPath);
+              savedMediaPaths.push(videoPath);
+            }
+
+            for (const documentFile of documentFiles) {
+              const documentPath =
+                saveUploadedDocument(documentFile);
+
+              if (!documentPath) {
+                continue;
+              }
+
+              savedDocumentPaths.push(documentPath);
+              savedMediaPaths.push(documentPath);
+            }
+          } catch (uploadError) {
+            removeUploadedPhotos(savedMediaPaths);
+            throw uploadError;
+          }
+
+          let productId;
+
+          try {
+            productId = db.transaction(() => {
+              const result =
+                db.prepare(`
+                  INSERT INTO products
+                (
+                  name,
+                  price,
+                  description,
+                  category_id,
+                  image,
+                  sku,
+                  brand_id,
+                  currency,
+                  availability,
+                  price_on_request,
+                  unit,
+                  discount_percent,
+                  is_new,
+                  is_hit,
+                  sort_order
+                )
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `).run(
+                name,
+                price,
+                description,
+                categoryIds[0] ||
+                null,
+                mainImagePath,
+                sku,
+                brandId,
+                currency,
+                availability,
+                priceOnRequest,
+                unit,
+                discountPercent,
+                isNew,
+                isHit,
+                sortOrder
+              );
+
+              const newProductId =
+                Number(
+                  result.lastInsertRowid
+                );
+
+              saveProductCategories(
+                newProductId,
+                categoryIds
+              );
+
+              saveProductRecommendations(
+                newProductId,
+                recommendedIds
+              );
+
+              let gallerySortOrder =
+                db.prepare(`
+                  SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+                  FROM product_images
+                  WHERE product_id = ?
+                `).get(newProductId).next_sort_order;
+
+              for (const galleryImage of savedGalleryPaths) {
+                db.prepare(`
+                  INSERT INTO product_images
+                  (
+                    product_id,
+                    image,
+                    sort_order
+                  )
+                  VALUES (?, ?, ?)
+                `).run(
+                  newProductId,
+                  galleryImage,
+                  gallerySortOrder++
+                );
+              }
+
+              let videoSortOrder =
+                db.prepare(`
+                  SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+                  FROM product_videos
+                  WHERE product_id = ?
+                `).get(newProductId).next_sort_order;
+
+              for (const videoPath of savedVideoPaths) {
+                db.prepare(`
+                  INSERT INTO product_videos
+                  (
+                    product_id,
+                    video,
+                    sort_order
+                  )
+                  VALUES (?, ?, ?)
+                `).run(
+                  newProductId,
+                  videoPath,
+                  videoSortOrder++
+                );
+              }
+
+              let documentSortOrder =
+                db.prepare(`
+                  SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+                  FROM product_documents
+                  WHERE product_id = ?
+                `).get(newProductId).next_sort_order;
+
+              for (const documentPath of savedDocumentPaths) {
+                db.prepare(`
+                  INSERT INTO product_documents
+                  (
+                    product_id,
+                    document,
+                    sort_order
+                  )
+                  VALUES (?, ?, ?)
+                `).run(
+                  newProductId,
+                  documentPath,
+                  documentSortOrder++
+                );
+              }
+
+              for (const characteristic of characteristicValues) {
+                db.prepare(`
+                  INSERT INTO product_characteristics
+                  (
+                    product_id,
+                    characteristic_id,
+                    value
+                  )
+                  VALUES (?, ?, ?)
+                `).run(
+                  newProductId,
+                  characteristic.characteristicId,
+                  characteristic.value
+                );
+              }
+
+              return newProductId;
+            })();
+          } catch (dbError) {
+            // К этому моменту better-sqlite3 уже откатил всю транзакцию,
+            // поэтому удалять файлы безопасно: ссылок на них в БД не осталось.
+            removeUploadedPhotos(savedMediaPaths);
+            throw dbError;
+          }
 
           return redirect(
             res,
@@ -13526,78 +13775,27 @@ if (sortOrder < 1) {
 
   const imageFile = params.getFile("image");
 
-  const image =
-    imageFile
-      ? await saveUploadedImage(imageFile)
-      : existingProduct.image || "";
+  // Файлы, сохранённые этим запросом: при ошибке записи или БД удаляем
+  // только их. Существующие медиа товара при сбое не трогаем.
+  const savedMediaPaths = [];
 
-  db.prepare(`
-    UPDATE products
-    SET
-      name = ?,
-      price = ?,
-      description = ?,
-      sku = ?,
-      brand_id = ?,
-      category_id = ?,
-      image = ?,
-      currency = ?,
-      availability = ?,
-      price_on_request = ?,
-      unit = ?,
-      discount_percent = ?,
-      is_new = ?,
-      is_hit = ?,
-      sort_order = ?
-      WHERE id = ?
+  let newImage = "";
 
-  `).run(
-    name,
-    price,
-    description,
-    sku,
-    brandId,
-    categoryIds[0] || null,
-    image,
-    currency,
-    availability,
-    priceOnRequest,
-    unit,
-    discountPercent,
-    isNew,
-    isHit,
-    sortOrder,
-    id,
-  );
-
-  db.prepare(`
-    DELETE FROM product_characteristics
-    WHERE product_id = ?
-  `).run(id);
-
-  for (
-    const characteristic
-    of characteristicValues
-  ) {
-    db.prepare(`
-      INSERT INTO product_characteristics
-      (
-        product_id,
-        characteristic_id,
-        value
-      )
-      VALUES (?, ?, ?)
-    `).run(
-      id,
-      characteristic.characteristicId,
-      characteristic.value
-    );
+  try {
+    newImage = imageFile ? await saveUploadedImage(imageFile) : "";
+    if (newImage) {
+      savedMediaPaths.push(newImage);
+    }
+  } catch (uploadError) {
+    removeUploadedPhotos(savedMediaPaths);
+    throw uploadError;
   }
 
-  saveProductCategories(id, categoryIds);
+  const image =
+    newImage || existingProduct.image || "";
 
-  saveProductRecommendations(id, recommendedIds);
-
+  // Готовим все файлы ДО транзакции: перекодировка sharp асинхронная,
+  // а better-sqlite3 запрещает await внутри db.transaction().
   const galleryFiles =
     params.getAllFiles("gallery");
 
@@ -13607,97 +13805,197 @@ if (sortOrder < 1) {
     "image/webp": ".webp"
   };
 
-  let gallerySortOrder =
-    db.prepare(`
-      SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
-      FROM product_images
-      WHERE product_id = ?
-    `).get(id).next_sort_order;
+  const savedGalleryPaths = [];
+  const savedVideoPaths = [];
+  const savedDocumentPaths = [];
 
-  for (const galleryFile of galleryFiles) {
-    const galleryImage =
-await saveUploadedImage(
-        galleryFile,
-        galleryAllowedTypes
+  try {
+    for (const galleryFile of galleryFiles) {
+      const galleryImage =
+        await saveUploadedImage(
+          galleryFile,
+          galleryAllowedTypes
+        );
+
+      if (!galleryImage) {
+        continue;
+      }
+
+      savedGalleryPaths.push(galleryImage);
+      savedMediaPaths.push(galleryImage);
+    }
+
+    for (const videoFile of videoFiles) {
+      const videoPath =
+        saveUploadedVideo(videoFile);
+
+      if (!videoPath) {
+        continue;
+      }
+
+      savedVideoPaths.push(videoPath);
+      savedMediaPaths.push(videoPath);
+    }
+
+    for (const documentFile of documentFiles) {
+      const documentPath =
+        saveUploadedDocument(documentFile);
+
+      if (!documentPath) {
+        continue;
+      }
+
+      savedDocumentPaths.push(documentPath);
+      savedMediaPaths.push(documentPath);
+    }
+  } catch (uploadError) {
+    removeUploadedPhotos(savedMediaPaths);
+    throw uploadError;
+  }
+
+  try {
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE products
+        SET
+          name = ?,
+          price = ?,
+          description = ?,
+          sku = ?,
+          brand_id = ?,
+          category_id = ?,
+          image = ?,
+          currency = ?,
+          availability = ?,
+          price_on_request = ?,
+          unit = ?,
+          discount_percent = ?,
+          is_new = ?,
+          is_hit = ?,
+          sort_order = ?
+          WHERE id = ?
+
+      `).run(
+        name,
+        price,
+        description,
+        sku,
+        brandId,
+        categoryIds[0] || null,
+        image,
+        currency,
+        availability,
+        priceOnRequest,
+        unit,
+        discountPercent,
+        isNew,
+        isHit,
+        sortOrder,
+        id,
       );
 
-    if (!galleryImage) {
-      continue;
-    }
+      db.prepare(`
+        DELETE FROM product_characteristics
+        WHERE product_id = ?
+      `).run(id);
 
-    db.prepare(`
-      INSERT INTO product_images
-      (
-        product_id,
-        image,
-        sort_order
-      )
-      VALUES (?, ?, ?)
-    `).run(
-      id,
-      galleryImage,
-      gallerySortOrder++
-    );
-  }
+      for (
+        const characteristic
+        of characteristicValues
+      ) {
+        db.prepare(`
+          INSERT INTO product_characteristics
+          (
+            product_id,
+            characteristic_id,
+            value
+          )
+          VALUES (?, ?, ?)
+        `).run(
+          id,
+          characteristic.characteristicId,
+          characteristic.value
+        );
+      }
 
-  let videoSortOrder =
-    db.prepare(`
-      SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
-      FROM product_videos
-      WHERE product_id = ?
-    `).get(id).next_sort_order;
+      saveProductCategories(id, categoryIds);
 
-  for (const videoFile of videoFiles) {
-    const videoPath =
-      saveUploadedVideo(videoFile);
+      saveProductRecommendations(id, recommendedIds);
 
-    if (!videoPath) {
-      continue;
-    }
+      let gallerySortOrder =
+        db.prepare(`
+          SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+          FROM product_images
+          WHERE product_id = ?
+        `).get(id).next_sort_order;
 
-    db.prepare(`
-      INSERT INTO product_videos
-      (
-        product_id,
-        video,
-        sort_order
-      )
-      VALUES (?, ?, ?)
-    `).run(
-      id,
-      videoPath,
-      videoSortOrder++
-    );
-  }
+      for (const galleryImage of savedGalleryPaths) {
+        db.prepare(`
+          INSERT INTO product_images
+          (
+            product_id,
+            image,
+            sort_order
+          )
+          VALUES (?, ?, ?)
+        `).run(
+          id,
+          galleryImage,
+          gallerySortOrder++
+        );
+      }
 
-  let documentSortOrder =
-    db.prepare(`
-      SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
-      FROM product_documents
-      WHERE product_id = ?
-    `).get(id).next_sort_order;
+      let videoSortOrder =
+        db.prepare(`
+          SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+          FROM product_videos
+          WHERE product_id = ?
+        `).get(id).next_sort_order;
 
-  for (const documentFile of documentFiles) {
-    const documentPath =
-      saveUploadedDocument(documentFile);
+      for (const videoPath of savedVideoPaths) {
+        db.prepare(`
+          INSERT INTO product_videos
+          (
+            product_id,
+            video,
+            sort_order
+          )
+          VALUES (?, ?, ?)
+        `).run(
+          id,
+          videoPath,
+          videoSortOrder++
+        );
+      }
 
-    if (!documentPath) {
-      continue;
-    }
+      let documentSortOrder =
+        db.prepare(`
+          SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+          FROM product_documents
+          WHERE product_id = ?
+        `).get(id).next_sort_order;
 
-    db.prepare(`
-      INSERT INTO product_documents
-      (
-        product_id,
-        document,
-        sort_order
-      )
-      VALUES (?, ?, ?)
-    `).run(
-      id,
-      documentPath,
-      documentSortOrder++
-    );
+      for (const documentPath of savedDocumentPaths) {
+        db.prepare(`
+          INSERT INTO product_documents
+          (
+            product_id,
+            document,
+            sort_order
+          )
+          VALUES (?, ?, ?)
+        `).run(
+          id,
+          documentPath,
+          documentSortOrder++
+        );
+      }
+    })();
+  } catch (dbError) {
+    // Транзакция уже откатана better-sqlite3: ссылки на новые файлы
+    // в БД не осталось, удалять их безопасно. Старые медиа не трогаем.
+    removeUploadedPhotos(savedMediaPaths);
+    throw dbError;
   }
 
   return redirect(
@@ -14536,10 +14834,38 @@ if (
 
           let image = "";
           let video = "";
+          // Файлы, сохранённые этим запросом: при любой ошибке загрузки
+          // или БД удаляем их, чтобы не оставлять осиротевшие файлы.
+          const savedMediaPaths = [];
+          const savedGalleryPaths = [];
+
           try {
             image = imageFile ? await saveUploadedImage(imageFile) : "";
+            if (image) {
+              savedMediaPaths.push(image);
+            }
             video = videoFile ? saveUploadedVideo(videoFile) : "";
+            if (video) {
+              savedMediaPaths.push(video);
+            }
+
+            // Галерею готовим тоже до транзакции: sharp асинхронный,
+            // await внутри db.transaction() запрещён better-sqlite3.
+            const galleryFiles = params.getAllFiles("gallery");
+            for (const galleryFile of galleryFiles) {
+              const galleryImage = await saveUploadedImage(galleryFile, {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/webp": ".webp"
+              });
+              if (!galleryImage) {
+                continue;
+              }
+              savedGalleryPaths.push(galleryImage);
+              savedMediaPaths.push(galleryImage);
+            }
           } catch (uploadError) {
+            removeUploadedPhotos(savedMediaPaths);
             // Нейтральное сообщение: исходный текст ошибки (формат файла,
             // сбой диска и т.п.) администратору не показываем.
             console.error("[admin] service create upload error:", classifyError(uploadError));
@@ -14550,30 +14876,33 @@ if (
             );
           }
 
-          const result = db.prepare(`
-            INSERT INTO services
-            (name, short_description, description, image, sort_order, is_visible, video, price, price_on_request, unit, region, service_type, min_rental_hours)
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
-          `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, region, serviceType, minRentalHours);
+          try {
+            db.transaction(() => {
+              const result = db.prepare(`
+                INSERT INTO services
+                (name, short_description, description, image, sort_order, is_visible, video, price, price_on_request, unit, region, service_type, min_rental_hours)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+              `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, region, serviceType, minRentalHours);
 
-          replaceServiceTariffs(Number(result.lastInsertRowid), tariffResult.tariffs);
-          saveServiceCharacteristics(Number(result.lastInsertRowid), params);
+              const serviceId = Number(result.lastInsertRowid);
 
-          const galleryFiles = params.getAllFiles("gallery");
-          let gallerySortOrder = 0;
-          for (const galleryFile of galleryFiles) {
-            const galleryImage = await saveUploadedImage(galleryFile, {
-              "image/jpeg": ".jpg",
-              "image/png": ".png",
-              "image/webp": ".webp"
-            });
-            if (!galleryImage) {
-              continue;
-            }
-            db.prepare(`
-              INSERT INTO service_images (service_id, image, sort_order)
-              VALUES (?, ?, ?)
-            `).run(Number(result.lastInsertRowid), galleryImage, gallerySortOrder++);
+              // Вложенные db.transaction() внутри внешней работают как
+              // savepoints (better-sqlite3), поэтому откат общий.
+              replaceServiceTariffs(serviceId, tariffResult.tariffs);
+              saveServiceCharacteristics(serviceId, params);
+
+              let gallerySortOrder = 0;
+              for (const galleryImage of savedGalleryPaths) {
+                db.prepare(`
+                  INSERT INTO service_images (service_id, image, sort_order)
+                  VALUES (?, ?, ?)
+                `).run(serviceId, galleryImage, gallerySortOrder++);
+              }
+            })();
+          } catch (dbError) {
+            // Транзакция уже откатана: ссылок на файлы в БД не осталось.
+            removeUploadedPhotos(savedMediaPaths);
+            throw dbError;
           }
 
           return redirect(res, "/admin/services");
@@ -14838,14 +15167,24 @@ if (
 
           let image = service.image;
           let video = service.video || "";
+          // Файлы, сохранённые этим запросом (только новые): при ошибке
+          // загрузки или БД удаляем их; старые файлы не трогаем.
+          const savedMediaPaths = [];
           try {
             if (imageFile) {
               image = await saveUploadedImage(imageFile);
+              if (image) {
+                savedMediaPaths.push(image);
+              }
             }
             if (videoFile) {
               video = saveUploadedVideo(videoFile);
+              if (video) {
+                savedMediaPaths.push(video);
+              }
             }
           } catch (uploadError) {
+            removeUploadedPhotos(savedMediaPaths);
             console.error("[admin] service update upload error:", classifyError(uploadError));
             return sendHtml(
               res,
@@ -14854,41 +15193,71 @@ if (
             );
           }
 
-          db.prepare(`
-            UPDATE services
-            SET name = ?, short_description = ?, description = ?, image = ?, sort_order = ?, video = ?, price = ?, price_on_request = ?, unit = ?, region = ?, service_type = ?, min_rental_hours = ?
-            WHERE id = ?
-          `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, region, serviceType, minRentalHours, id);
+          const savedGalleryPaths = [];
 
-          replaceServiceTariffs(id, tariffResult.tariffs);
-          saveServiceCharacteristics(id, params, true);
-
-          const galleryFiles = params.getAllFiles("gallery");
-          let gallerySortOrder = db.prepare(`
-            SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
-            FROM service_images
-            WHERE service_id = ?
-          `).get(id).next_sort_order;
-          for (const galleryFile of galleryFiles) {
-            const galleryImage = await saveUploadedImage(galleryFile, {
-              "image/jpeg": ".jpg",
-              "image/png": ".png",
-              "image/webp": ".webp"
-            });
-            if (!galleryImage) {
-              continue;
+          try {
+            // Галерею готовим до транзакции: await внутри
+            // db.transaction() запрещён better-sqlite3.
+            const galleryFiles = params.getAllFiles("gallery");
+            for (const galleryFile of galleryFiles) {
+              const galleryImage = await saveUploadedImage(galleryFile, {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/webp": ".webp"
+              });
+              if (!galleryImage) {
+                continue;
+              }
+              savedGalleryPaths.push(galleryImage);
+              savedMediaPaths.push(galleryImage);
             }
-            db.prepare(`
-              INSERT INTO service_images (service_id, image, sort_order)
-              VALUES (?, ?, ?)
-            `).run(id, galleryImage, gallerySortOrder++);
+          } catch (galleryError) {
+            removeUploadedPhotos(savedMediaPaths);
+            console.error("[admin] service update gallery error:", classifyError(galleryError));
+            return sendHtml(
+              res,
+              renderPage(req, "Ошибка", `<h1>Не удалось сохранить изображения галереи. Проверьте файлы и повторите попытку.</h1>`),
+              400
+            );
+          }
+
+          try {
+            db.transaction(() => {
+              db.prepare(`
+                UPDATE services
+                SET name = ?, short_description = ?, description = ?, image = ?, sort_order = ?, video = ?, price = ?, price_on_request = ?, unit = ?, region = ?, service_type = ?, min_rental_hours = ?
+                WHERE id = ?
+              `).run(name, shortDescription, description, image, sortOrder, video, price, priceOnRequest ? 1 : 0, unit, region, serviceType, minRentalHours, id);
+
+              // Вложенные транзакции = savepoints, откат общий.
+              replaceServiceTariffs(id, tariffResult.tariffs);
+              saveServiceCharacteristics(id, params, true);
+
+              let galleryStartSortOrder = db.prepare(`
+                SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
+                FROM service_images
+                WHERE service_id = ?
+              `).get(id).next_sort_order;
+
+              for (const galleryImage of savedGalleryPaths) {
+                db.prepare(`
+                  INSERT INTO service_images (service_id, image, sort_order)
+                  VALUES (?, ?, ?)
+                `).run(id, galleryImage, galleryStartSortOrder++);
+              }
+            })();
+          } catch (dbError) {
+            // Транзакция откатана: строки services/characteristics/tariffs
+            // и вставки service_images не применены, старые медиа не тронуты.
+            removeUploadedPhotos(savedMediaPaths);
+            throw dbError;
           }
 
           return redirect(res, "/admin/services");
         }
 
         // ==================================================
-        // УСЛУГИ — TOGGLE
+        // СЛУГИ — TOGGLE
         // ТОЛЬКО АДМИН
         // ==================================================
 
@@ -17589,77 +17958,59 @@ ${renderCsrfField()}
         );
 
 
-        if (
-          !res.headersSent
-        ) {
-
-          if (error && error.statusCode === 413) {
-            sendHtml(
-              res,
-              renderPage(
-                req,
-                "Файл слишком большой",
-                `
-                  <h1>413 — Файл слишком большой</h1>
-
-                  <p>
-                    Загруженные данные превышают допустимый размер.
-                    Уменьшите количество или размер файлов и попробуйте снова.
-                  </p>
-                `
-              ),
-              413
-            );
-            return;
-          }
-
-          // Повреждённые multipart-данные — ошибка клиента (400),
-          // а не internals сервера (500).
-          if (error && error.statusCode === 400) {
-            sendHtml(
-              res,
-              renderPage(
-                req,
-                "Некорректные данные",
-                `
-                  <h1>400 — Некорректные данные</h1>
-
-                  <p>
-                    Отправленные данные повреждены или имеют
-                    недопустимый формат. Обновите страницу и
-                    попробуйте снова.
-                  </p>
-                `
-              ),
-              400
-            );
-            return;
-          }
-
-          sendHtml(
+        // Все ответы — автономным fallback-шаблоном: renderPage здесь
+        // вызываться не должен (он сам может упасть на битом запросе/БД).
+        // sendFallbackHtml сам проверяет headersSent/writableEnded/destroyed,
+        // поэтому дублирование ответа и краш на мёртвом сокете исключены.
+        if (error && error.statusCode === 413) {
+          sendFallbackHtml(
             res,
-            renderPage(
-              req,
-              "500",
-              `
-                <h1>
-                  500 — Ошибка сервера
-                </h1>
-
-                <p>
-                  Произошла внутренняя
-                  ошибка сервера.
-                </p>
-              `
-            ),
-            500
+            413,
+            "Файл слишком большой",
+            "Загруженные данные превышают допустимый размер. " +
+              "Уменьшите количество или размер файлов и попробуйте снова."
           );
+          return;
+        }
 
-        } else {
+        // Перегрузка по одновременным multipart-загрузкам: слотов нет —
+        // 503 с Retry-After. Тело такого запроса не буферизовалось.
+        if (error && error.statusCode === 503) {
+          if (res.headersSent || res.writableEnded || res.destroyed) {
+            return;
+          }
+          res.setHeader("Retry-After", String(error.retryAfter || 5));
+          sendFallbackHtml(
+            res,
+            503,
+            "Сервер временно перегружен",
+            "Одновременно обрабатывается слишком много загрузок. " +
+              "Подождите несколько секунд и повторите отправку."
+          );
+          return;
+        }
 
-          res.end();
+        // Переведённые multipart-данные или некорректный request-target —
+        // ошибка клиента (400), а не internals сервера (500).
+        if (error && error.statusCode === 400) {
+          sendFallbackHtml(
+            res,
+            400,
+            "Некорректные данные",
+            "Отправленные данные повреждены или имеют недопустимый формат. " +
+              "Обновите страницу и попробуйте снова."
+          );
+          return;
+        }
 
-}}});
+        sendFallbackHtml(
+          res,
+          500,
+          "Ошибка сервера",
+          "Произошла внутренняя ошибка сервера."
+        );
+
+}});
 
 
 // ======================================================
