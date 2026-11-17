@@ -15,3 +15,31 @@ uploads/
 # Временные артефакты аудита/тестов (копии стенда, логи, куки, тесты) — не для Git
 __*
 
+# Private rollout/DR evidence, terminal transcripts and packaged snapshots
+/backup-*/
+/backup-*.tar.gz
+/backup-*.tar.gz.sha256
+/backup-*.log
+/backup-*.txt
+/backup-*.diff
+/backup-no-rotation-RESULTS.md
+/backup-no-rotation-remote-check.sh
+/stage2-audit.sh
+/deploy/dr-runtime-review/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.log
+.env.*
+!.env.example
+!deploy/.env.production.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+
+# Python local regression artifacts
+__pycache__/
+*.pyc

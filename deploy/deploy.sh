@@ -128,6 +128,8 @@ cmd_provision() {
   log "8/11 systemd: ${SERVICE} + ежедневный backup (03:30, хранить 14 копий)"
   install -m 644 "${APP_DIR}/deploy/systemd/karimoff.service"        "/etc/systemd/system/${SERVICE}.service"
   install -m 644 "${APP_DIR}/deploy/systemd/karimoff-backup.service" /etc/systemd/system/karimoff-backup.service
+  install -d -o root -g root -m 755 /etc/systemd/system/karimoff-backup.service.d
+  install -o root -g root -m 644 "${APP_DIR}/deploy/systemd/karimoff-backup.service.d/90-uploads.conf" /etc/systemd/system/karimoff-backup.service.d/90-uploads.conf
   install -m 644 "${APP_DIR}/deploy/systemd/karimoff-backup.timer"   /etc/systemd/system/karimoff-backup.timer
   systemctl daemon-reload
   systemctl enable --now "${SERVICE}.service" karimoff-backup.timer
